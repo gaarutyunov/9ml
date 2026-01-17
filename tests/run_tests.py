@@ -13,8 +13,10 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QEMU_DIR = os.path.join(PROJECT_DIR, "qemu")
 SRC_DIR = os.path.join(PROJECT_DIR, "src")
 TESTS_DIR = os.path.join(SRC_DIR, "tests")
-MODEL_PATH = "/Users/germanarutyunov/Projects/plan9/llama2.c/stories15M.bin"
-TOKENIZER_PATH = "/Users/germanarutyunov/Projects/plan9/llama2.c/tokenizer.bin"
+
+# Model paths - use environment variables or default to project directory
+MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(PROJECT_DIR, "stories15M.bin"))
+TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", os.path.join(PROJECT_DIR, "tokenizer.bin"))
 
 EPSILON = 0.0001
 

@@ -9,13 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          lfs: true
 
       - name: Install QEMU and dependencies
         run: |
@@ -26,6 +24,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Install 9front
+        run: ./qemu/install-9front.sh
+
+      - name: Download model weights
+        run: |
+          # Download TinyStories 15M model
+          curl -L -o stories15M.bin \
+            "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin"
+          # Download tokenizer
+          curl -L -o tokenizer.bin \
+            "https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin"
 
       - name: Create shared disk
         run: ./qemu/create-shared.sh
