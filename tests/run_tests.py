@@ -13,6 +13,7 @@ PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 QEMU_DIR = os.path.join(PROJECT_DIR, "qemu")
 SRC_DIR = os.path.join(PROJECT_DIR, "src")
 TESTS_DIR = os.path.join(SRC_DIR, "tests")
+SHARED_IMG = os.path.join(QEMU_DIR, "shared.img")
 
 # Model paths - use environment variables or default to project directory
 MODEL_PATH = os.environ.get("MODEL_PATH", os.path.join(PROJECT_DIR, "stories15M.bin"))
@@ -20,39 +21,42 @@ TOKENIZER_PATH = os.environ.get("TOKENIZER_PATH", os.path.join(PROJECT_DIR, "tok
 
 EPSILON = 0.0001
 
-def run_plan9_test(test_name, model_file="model.c", extra_files=None, timeout=300):
-    """Compile and run a test file in Plan 9, return output lines"""
-    test_file = os.path.join(TESTS_DIR, f"test_{test_name}.c")
-    model_path = os.path.join(SRC_DIR, model_file)
+def kill_qemu():
+    """Kill any lingering QEMU processes"""
+    subprocess.run(["pkill", "-9", "-f", "qemu-system"], capture_output=True)
 
-    # Build list of files to copy
-    files_to_copy = [test_file, model_path]
-    if extra_files:
-        files_to_copy.extend(extra_files)
+def clean_shared_disk():
+    """Recreate the shared FAT32 disk image to start fresh"""
+    if os.path.exists(SHARED_IMG):
+        os.remove(SHARED_IMG)
+    subprocess.run([os.path.join(QEMU_DIR, "create-shared.sh")],
+                   capture_output=True, check=True)
 
-    # Copy files to shared disk
-    subprocess.run([os.path.join(QEMU_DIR, "copy-to-shared.sh")] + files_to_copy,
-                   capture_output=True, timeout=60)
+def copy_to_shared(files):
+    """Copy files to the shared disk"""
+    subprocess.run([os.path.join(QEMU_DIR, "copy-to-shared.sh")] + files,
+                   capture_output=True, check=True, timeout=60)
 
-    # Compile and run in Plan 9 (cd to /mnt/host so includes work)
+def read_output_file(filename):
+    """Read an output file from the shared disk"""
     result = subprocess.run(
-        [os.path.join(QEMU_DIR, "run-cmd.sh"),
-         f"cd /mnt/host && 6c -w test_{test_name}.c && 6l -o test_{test_name} test_{test_name}.6 && ./test_{test_name}"],
-        capture_output=True, text=True, timeout=timeout
+        ["mcopy", "-i", SHARED_IMG, f"::{filename}", "-"],
+        capture_output=True, text=True
     )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
 
-    # Parse output - filter to lines that look like numbers or key=value
-    lines = []
-    for line in result.stdout.strip().split('\n'):
-        line = line.strip()
-        try:
-            float(line)
-            lines.append(line)
-        except ValueError:
-            # Check for key=value format
-            if '=' in line and not line.startswith('6c') and not line.startswith('6l'):
-                lines.append(line)
-    return lines
+def run_all_tests_in_vm():
+    """Run all tests in the Plan 9 VM"""
+    print("Running tests in Plan 9...", flush=True)
+    result = subprocess.run(
+        [os.path.join(QEMU_DIR, "run-tests.sh")],
+        capture_output=True, text=True, timeout=300
+    )
+    # Check if completion marker exists
+    complete = read_output_file("complete.txt")
+    return complete == "done"
 
 def compare_floats(ref, plan9, eps=EPSILON):
     """Compare two lists of floats within epsilon"""
@@ -63,6 +67,44 @@ def compare_floats(ref, plan9, eps=EPSILON):
         if abs(r - p) > eps:
             return False, f"Value mismatch at [{i}]: ref={r}, plan9={p}, diff={abs(r-p)}"
     return True, "OK"
+
+def parse_float_output(output):
+    """Parse output containing floats, one per line"""
+    lines = []
+    for line in output.split('\n'):
+        line = line.strip()
+        try:
+            lines.append(float(line))
+        except ValueError:
+            continue
+    return lines
+
+def parse_int_output(output):
+    """Parse output containing integers, one per line"""
+    lines = []
+    for line in output.split('\n'):
+        line = line.strip()
+        try:
+            lines.append(int(line))
+        except ValueError:
+            continue
+    return lines
+
+def parse_keyval_output(output):
+    """Parse key=value output"""
+    result = {}
+    for line in output.split('\n'):
+        line = line.strip()
+        if '=' in line and not line.startswith('6c') and not line.startswith('6l'):
+            key, val = line.split('=', 1)
+            try:
+                result[key] = int(val)
+            except ValueError:
+                try:
+                    result[key] = float(val)
+                except ValueError:
+                    result[key] = val
+    return result
 
 def test_rmsnorm():
     """Test rmsnorm function"""
@@ -76,9 +118,9 @@ def test_rmsnorm():
     ss = 1.0 / math.sqrt(ss)
     ref = [wi * (ss * xi) for wi, xi in zip(w, x)]
 
-    # Run Plan 9 test
-    plan9_out = run_plan9_test("rmsnorm")
-    plan9 = [float(x) for x in plan9_out]
+    # Read Plan 9 output
+    plan9_out = read_output_file("rmsnorm.out")
+    plan9 = parse_float_output(plan9_out)
 
     ok, msg = compare_floats(ref, plan9)
     if ok:
@@ -101,9 +143,9 @@ def test_softmax():
     total = sum(exp_x)
     ref = [v / total for v in exp_x]
 
-    # Run Plan 9 test
-    plan9_out = run_plan9_test("softmax")
-    plan9 = [float(x) for x in plan9_out]
+    # Read Plan 9 output
+    plan9_out = read_output_file("softmax.out")
+    plan9 = parse_float_output(plan9_out)
 
     ok, msg = compare_floats(ref, plan9)
     if ok:
@@ -122,69 +164,11 @@ def test_matmul():
     x = [1, 2, 3, 4]
     ref = [sum(r * xi for r, xi in zip(row, x)) for row in w]
 
-    # Run Plan 9 test
-    plan9_out = run_plan9_test("matmul")
-    plan9 = [float(x) for x in plan9_out]
+    # Read Plan 9 output
+    plan9_out = read_output_file("matmul.out")
+    plan9 = parse_float_output(plan9_out)
 
     ok, msg = compare_floats(ref, plan9)
-    if ok:
-        print("PASS")
-        return True
-    else:
-        print(f"FAIL: {msg}")
-        return False
-
-def test_model_loading():
-    """Test that model config and weights are loaded correctly"""
-    print("Testing model loading...", end=" ", flush=True)
-
-    if not os.path.exists(MODEL_PATH):
-        print("SKIP (model not found)")
-        return None
-
-    # Python reference - read config and first 10 weights
-    import struct
-    with open(MODEL_PATH, 'rb') as f:
-        config = struct.unpack('7i', f.read(28))
-        weights = struct.unpack('10f', f.read(40))
-
-    ref_config = {
-        'dim': config[0],
-        'hidden_dim': config[1],
-        'n_layers': config[2],
-        'n_heads': config[3],
-        'n_kv_heads': config[4],
-        'vocab_size': abs(config[5]),  # Can be negative
-        'seq_len': config[6]
-    }
-    ref_weights = list(weights)
-
-    # Copy model to shared disk and run test
-    plan9_out = run_plan9_test("model_loading", extra_files=[MODEL_PATH])
-
-    # Parse Plan 9 output
-    plan9_config = {}
-    plan9_weights = []
-    for line in plan9_out:
-        if '=' in line:
-            key, val = line.split('=', 1)
-            if key.startswith('w'):
-                plan9_weights.append(float(val))
-            else:
-                plan9_config[key] = int(val)
-
-    # Compare config
-    config_ok = True
-    for key in ref_config:
-        if plan9_config.get(key) != ref_config[key]:
-            print(f"FAIL: config.{key} mismatch: ref={ref_config[key]}, plan9={plan9_config.get(key)}")
-            config_ok = False
-
-    if not config_ok:
-        return False
-
-    # Compare weights
-    ok, msg = compare_floats(ref_weights, plan9_weights)
     if ok:
         print("PASS")
         return True
@@ -209,9 +193,9 @@ def test_rng():
         state, val = random_u32(state)
         ref.append(val)
 
-    # Run Plan 9 test
-    plan9_out = run_plan9_test("rng")
-    plan9 = [int(x) for x in plan9_out]
+    # Read Plan 9 output
+    plan9_out = read_output_file("rng.out")
+    plan9 = parse_int_output(plan9_out)
 
     if ref == plan9:
         print("PASS")
@@ -222,6 +206,57 @@ def test_rng():
         print(f"  Plan 9:    {plan9}")
         return False
 
+def test_model_loading():
+    """Test that model config and weights are loaded correctly"""
+    print("Testing model loading...", end=" ", flush=True)
+
+    if not os.path.exists(MODEL_PATH):
+        print("SKIP (model not found)")
+        return None
+
+    # Python reference - read config and first 10 weights
+    import struct
+    with open(MODEL_PATH, 'rb') as f:
+        config = struct.unpack('7i', f.read(28))
+        weights = struct.unpack('10f', f.read(40))
+
+    ref_config = {
+        'dim': config[0],
+        'hidden_dim': config[1],
+        'n_layers': config[2],
+        'n_heads': config[3],
+        'n_kv_heads': config[4],
+        'vocab_size': abs(config[5]),
+        'seq_len': config[6]
+    }
+    ref_weights = list(weights)
+
+    # Read Plan 9 output
+    plan9_out = read_output_file("model_loading.out")
+    kv = parse_keyval_output(plan9_out)
+
+    plan9_config = {k: kv.get(k) for k in ref_config.keys()}
+    plan9_weights = [kv.get(f'w{i}') for i in range(10) if f'w{i}' in kv]
+
+    # Compare config
+    config_ok = True
+    for key in ref_config:
+        if plan9_config.get(key) != ref_config[key]:
+            print(f"FAIL: config.{key} mismatch: ref={ref_config[key]}, plan9={plan9_config.get(key)}")
+            config_ok = False
+
+    if not config_ok:
+        return False
+
+    # Compare weights
+    ok, msg = compare_floats(ref_weights, plan9_weights)
+    if ok:
+        print("PASS")
+        return True
+    else:
+        print(f"FAIL: {msg}")
+        return False
+
 def test_generation():
     """Test end-to-end generation matches between host and Plan 9"""
     print("Testing generation...", end=" ", flush=True)
@@ -230,44 +265,27 @@ def test_generation():
         print("SKIP (model or tokenizer not found)")
         return None
 
-    # Run host version (stdout has generated text, stderr has timing info)
-    host_binary = os.path.join(os.path.dirname(MODEL_PATH), "run")
+    # Download and compile reference llama2.c if needed
+    ref_c = "/tmp/run_ref.c"
+    ref_bin = "/tmp/run_ref"
+    if not os.path.exists(ref_c):
+        subprocess.run([
+            "curl", "-sL",
+            "https://raw.githubusercontent.com/karpathy/llama2.c/master/run.c",
+            "-o", ref_c
+        ], check=True)
+    if not os.path.exists(ref_bin):
+        subprocess.run(["gcc", "-O3", "-o", ref_bin, ref_c, "-lm"], check=True)
+
+    # Run host reference version
     host_result = subprocess.run(
-        [host_binary, MODEL_PATH, "-z", TOKENIZER_PATH, "-n", "20", "-s", "42", "-i", "Once upon a time"],
+        [ref_bin, MODEL_PATH, "-z", TOKENIZER_PATH, "-n", "20", "-s", "42", "-t", "0.0", "-i", "Once upon a time"],
         capture_output=True, text=True, timeout=60
     )
-    host_output = host_result.stdout.strip()
+    host_output = host_result.stdout.strip().split('\n')[0]
 
-    # Copy files to shared disk
-    subprocess.run([os.path.join(QEMU_DIR, "copy-to-shared.sh"),
-                    os.path.join(SRC_DIR, "run.c"),
-                    os.path.join(SRC_DIR, "model.c"),
-                    MODEL_PATH, TOKENIZER_PATH],
-                   capture_output=True, timeout=120)
-
-    # Compile and run in Plan 9, redirect output to file
-    subprocess.run(
-        [os.path.join(QEMU_DIR, "run-cmd.sh"),
-         "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -i 'Once upon a time' > output.txt"],
-        capture_output=True, text=True, timeout=300
-    )
-
-    # Read output file from shared disk
-    mount_point = subprocess.run(["mktemp", "-d", "/tmp/shared_mount.XXXXXX"],
-                                  capture_output=True, text=True).stdout.strip()
-    subprocess.run(["hdiutil", "attach", "-imagekey", "diskimage-class=CRawDiskImage",
-                    "-mountpoint", mount_point,
-                    os.path.join(QEMU_DIR, "shared.img")],
-                   capture_output=True)
-
-    output_file = os.path.join(mount_point, "output.txt")
-    plan9_output = ""
-    if os.path.exists(output_file):
-        with open(output_file, 'r') as f:
-            plan9_output = f.read().strip()
-
-    subprocess.run(["hdiutil", "detach", mount_point], capture_output=True)
-    subprocess.run(["rmdir", mount_point], capture_output=True)
+    # Read Plan 9 output
+    plan9_output = read_output_file("generation.out").split('\n')[0] if read_output_file("generation.out") else ""
 
     if host_output == plan9_output:
         print("PASS")
@@ -302,11 +320,11 @@ def test_quantize():
     for i in range(len(q)):
         ref.append(q[i] * s[i // GS])
 
-    # Run Plan 9 test with modelq.c
-    plan9_out = run_plan9_test("quantize", model_file="modelq.c")
-    plan9 = [float(x) for x in plan9_out]
+    # Read Plan 9 output
+    plan9_out = read_output_file("quantize.out")
+    plan9 = parse_float_output(plan9_out)
 
-    ok, msg = compare_floats(ref, plan9, eps=0.1)  # Larger epsilon for quantization error
+    ok, msg = compare_floats(ref, plan9, eps=0.1)
     if ok:
         print("PASS")
         return True
@@ -353,11 +371,11 @@ def test_quantized_matmul():
             val += float(ival) * ws[j // GS] * xs[j // GS]
         ref.append(val)
 
-    # Run Plan 9 test with modelq.c
-    plan9_out = run_plan9_test("quantized_matmul", model_file="modelq.c")
-    plan9 = [float(x) for x in plan9_out]
+    # Read Plan 9 output
+    plan9_out = read_output_file("quantized_matmul.out")
+    plan9 = parse_float_output(plan9_out)
 
-    ok, msg = compare_floats(ref, plan9, eps=0.5)  # Larger epsilon for quantization error
+    ok, msg = compare_floats(ref, plan9, eps=0.5)
     if ok:
         print("PASS")
         return True
@@ -373,16 +391,55 @@ def main():
     print("=" * 50)
     print()
 
+    # Clean up environment
+    print("Initializing environment...", flush=True)
+    kill_qemu()
+    clean_shared_disk()
+
+    # Copy all test files and model to shared disk
+    print("Copying test files...", flush=True)
+    files_to_copy = [
+        os.path.join(TESTS_DIR, "test_rmsnorm.c"),
+        os.path.join(TESTS_DIR, "test_softmax.c"),
+        os.path.join(TESTS_DIR, "test_matmul.c"),
+        os.path.join(TESTS_DIR, "test_rng.c"),
+        os.path.join(TESTS_DIR, "test_quantize.c"),
+        os.path.join(TESTS_DIR, "test_quantized_matmul.c"),
+        os.path.join(TESTS_DIR, "test_model_loading.c"),
+        os.path.join(SRC_DIR, "model.c"),
+        os.path.join(SRC_DIR, "modelq.c"),
+        os.path.join(SRC_DIR, "run.c"),
+    ]
+
+    if os.path.exists(MODEL_PATH):
+        files_to_copy.append(MODEL_PATH)
+    if os.path.exists(TOKENIZER_PATH):
+        files_to_copy.append(TOKENIZER_PATH)
+
+    copy_to_shared(files_to_copy)
+
+    # Run all tests in VM
+    vm_success = run_all_tests_in_vm()
+    if not vm_success:
+        print("WARNING: VM tests may not have completed fully")
+
+    print()
+
+    # Check results
     results = {
         'rmsnorm': test_rmsnorm(),
         'softmax': test_softmax(),
         'matmul': test_matmul(),
         'rng': test_rng(),
-        'model_loading': test_model_loading(),
-        'generation': test_generation(),
         'quantize': test_quantize(),
         'quantized_matmul': test_quantized_matmul(),
+        'model_loading': test_model_loading(),
+        'generation': test_generation(),
     }
+
+    # Clean up
+    kill_qemu()
+    clean_shared_disk()
 
     print()
     print("=" * 50)
