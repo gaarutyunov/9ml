@@ -1,0 +1,20 @@
+</$objtype/mkfile
+
+TARG=run runq export
+
+all:V: $TARG
+
+run: run.$O
+	$LD -o $target $prereq
+
+runq: runq.$O
+	$LD -o $target $prereq
+
+export: export.$O
+	$LD -o $target $prereq
+
+%.$O: %.c
+	$CC $CFLAGS $stem.c
+
+clean:V:
+	rm -f *.$O $TARG

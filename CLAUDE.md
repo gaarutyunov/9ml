@@ -5,26 +5,46 @@ Port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front).
 ## Rules
 
 1. **NEVER skip tests.** All tests are mandatory. If a test cannot run, fix the environment - do not skip.
-2. **All changes must be tested.** Run `python3 tests/run_tests.py` before committing.
-3. **CI must pass.** Do not merge if CI fails.
+2. **All changes must be tested.** Run tests before committing:
+   - **Linux host:** `cd test && gcc -o harness *.c -lm && ./harness`
+   - **Plan 9 native:** `mk` (compiles all targets)
+3. **Tests must pass.** Do not merge if tests fail.
 
 ---
 
 ## Quick Start
 
+### Running Tests (Linux Host)
+
 ```bash
-# Install 9front (downloads ISO and installs automatically)
-./qemu/install-9front.sh
+# Compile and run the test harness
+cd test
+gcc -o harness *.c -lm
+./harness
+```
 
-# Create shared disk for file transfer
-./qemu/create-shared.sh
+The test harness:
+1. Starts a Plan 9 QEMU VM
+2. Compiles and runs tests inside Plan 9
+3. Compares output against C reference implementations
+4. Reports pass/fail
 
-# Run the test suite
-python3 tests/run_tests.py
+### Building in Plan 9
 
-# Copy files to Plan 9 and run inference
-./qemu/copy-to-shared.sh src/run.c stories15M.bin tokenizer.bin
-./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin -z tokenizer.bin"
+```bash
+# Clone repo and build natively in Plan 9
+mk            # Build all: run, runq, export, tests
+mk clean      # Clean all build artifacts
+```
+
+### Model Tools
+
+```bash
+# Show model info
+./export info stories15M.bin
+
+# Quantize a model (FP32 -> Q8_0)
+./export quantize stories15M.bin stories15M_q80.bin
 ```
 
 ---
@@ -38,7 +58,10 @@ python3 tests/run_tests.py
 │   ├── runq.c             # INT8 quantized inference (ported)
 │   ├── model.c            # Model loading helpers
 │   ├── modelq.c           # Quantized model helpers
+│   ├── export.c           # Model export/conversion tool
+│   ├── mkfile             # Plan 9 build file
 │   └── tests/             # Plan 9 test source files
+│       ├── mkfile         # Plan 9 test build file
 │       ├── test_rmsnorm.c
 │       ├── test_softmax.c
 │       ├── test_matmul.c
@@ -46,97 +69,37 @@ python3 tests/run_tests.py
 │       ├── test_model_loading.c
 │       ├── test_quantize.c
 │       └── test_quantized_matmul.c
-├── tests/
-│   └── run_tests.py       # Automated test suite (Python)
+├── test/                  # C test harness (Linux host)
+│   ├── harness.c          # Main test driver
+│   ├── reference.c/h      # Reference implementations
+│   ├── qemu.c/h           # QEMU VM management
+│   └── fat.c/h            # FAT disk operations (mtools)
 ├── qemu/
-│   ├── install-9front.sh  # Download and install 9front
-│   ├── create-shared.sh   # Create FAT32 shared disk
-│   ├── os-helper.sh       # Cross-platform helper functions
-│   ├── run-cmd.sh         # Execute commands in Plan 9
-│   ├── run-qemu.sh        # Start QEMU manually
-│   ├── copy-to-shared.sh  # Copy files to shared disk
-│   └── copy-from-shared.sh # Copy files from shared disk
-├── .github/
-│   └── workflows/
-│       └── test.yml       # CI workflow
-├── export.py              # Model export script
-└── model.py               # Model definitions
-```
-
----
-
-## Running Commands in Plan 9
-
-### Execute a Single Command
-
-```bash
-./qemu/run-cmd.sh "your command here"
-```
-
-This script:
-1. Starts QEMU with 9front
-2. Boots to the rc shell
-3. Mounts the shared FAT disk at `/mnt/host`
-4. Executes your command
-5. Captures and returns output
-6. Shuts down QEMU
-
-### Examples
-
-```bash
-# List files in Plan 9
-./qemu/run-cmd.sh "ls /mnt/host"
-
-# Compile C code
-./qemu/run-cmd.sh "6c /mnt/host/myfile.c"
-
-# Link binary
-./qemu/run-cmd.sh "6l -o myprogram myfile.6"
-
-# Run a program
-./qemu/run-cmd.sh "./myprogram arg1 arg2"
-
-# Chain commands
-./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin"
-```
-
----
-
-## File Sharing with Plan 9
-
-Files are shared via a FAT32 disk image mounted at `/mnt/host` in Plan 9.
-
-### Copy Files TO Plan 9
-
-```bash
-# Single file
-./qemu/copy-to-shared.sh /path/to/file.c
-
-# Multiple files
-./qemu/copy-to-shared.sh file1.c file2.c model.bin
-
-# Files appear at /mnt/host/ in Plan 9
-```
-
-### Copy Files FROM Plan 9
-
-```bash
-# Copy all files from shared disk to destination
-./qemu/copy-from-shared.sh /destination/directory/
+│   ├── 9front.qcow2       # VM disk image
+│   └── shared.img         # FAT disk for file sharing
+├── mkfile                 # Root Plan 9 build file
+├── stories15M.bin         # Model weights (FP32)
+└── tokenizer.bin          # Tokenizer data
 ```
 
 ---
 
 ## Running Tests
 
-The test suite compares Plan 9 output against Python reference implementations.
+### Linux Host Testing
+
+The test harness compiles and runs all tests in a Plan 9 QEMU VM:
 
 ```bash
-# Run all tests
-python3 tests/run_tests.py
+cd test
+gcc -o harness *.c -lm
+./harness
 ```
 
-**All tests must pass. No exceptions.**
+**Requirements:**
+- `qemu-system-x86_64`
+- `mtools` (mcopy, mkfs.vfat)
+- `curl` (for downloading 9front if needed)
 
 ### Test Coverage
 
@@ -153,7 +116,23 @@ python3 tests/run_tests.py
 
 ---
 
-## Compiling in Plan 9
+## Building in Plan 9
+
+### Using mkfiles
+
+```bash
+# Build everything (from repo root)
+mk
+
+# Build only src targets (run, runq, export)
+cd src && mk
+
+# Build only test binaries
+cd src/tests && mk
+
+# Clean
+mk clean
+```
 
 ### Architecture
 
@@ -162,24 +141,17 @@ python3 tests/run_tests.py
 - Linker: `6l` (NOT `8l`)
 - Object files: `.6` extension
 
-### Compile and Link
+### Manual Compilation
 
 ```bash
 # Compile
-./qemu/run-cmd.sh "6c /mnt/host/program.c"
+6c -w program.c
 
 # Link
-./qemu/run-cmd.sh "6l -o program program.6"
+6l -o program program.6
 
-# Or chain them
-./qemu/run-cmd.sh "6c /mnt/host/program.c && 6l -o program program.6"
-```
-
-### Compiler Flags
-
-```bash
-# Suppress warnings
-./qemu/run-cmd.sh "6c -w /mnt/host/program.c"
+# Combined
+6c -w program.c && 6l -o program program.6
 ```
 
 ---
@@ -188,26 +160,23 @@ python3 tests/run_tests.py
 
 ### FP32 Inference (run.c)
 
-```bash
-# Copy files
-./qemu/copy-to-shared.sh src/run.c stories15M.bin tokenizer.bin
-
-# Compile and run
-./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin -z tokenizer.bin -n 50 -i 'Once upon a time'"
+In Plan 9:
+```rc
+6c -w run.c && 6l -o run run.6
+./run stories15M.bin -z tokenizer.bin -n 50 -i 'Once upon a time'
 ```
 
 ### INT8 Quantized Inference (runq.c)
 
-First, export a quantized model:
+First, quantize the model:
 ```bash
-python export.py stories15M_q80.bin --version 2 --checkpoint stories15M.pt
+./export quantize stories15M.bin stories15M_q80.bin
 ```
 
-Then run:
-```bash
-./qemu/copy-to-shared.sh src/runq.c stories15M_q80.bin tokenizer.bin
-
-./qemu/run-cmd.sh "cd /mnt/host && 6c -w runq.c && 6l -o runq runq.6 && ./runq stories15M_q80.bin -z tokenizer.bin -n 50"
+Then run in Plan 9:
+```rc
+6c -w runq.c && 6l -o runq runq.6
+./runq stories15M_q80.bin -z tokenizer.bin -n 50
 ```
 
 ### Command Line Options
@@ -221,6 +190,30 @@ Then run:
 | `-i <string>` | Input prompt |
 | `-z <string>` | Path to tokenizer |
 | `-m generate\|chat` | Mode (default: generate) |
+
+---
+
+## Model Export Tool
+
+The `export` tool handles model inspection and conversion:
+
+```bash
+# Show model info (works on Linux or Plan 9)
+./export info model.bin
+
+# Quantize FP32 model to Q8_0 (32-element groups)
+./export quantize model.bin model_q80.bin
+```
+
+Build on Linux:
+```bash
+gcc -o export src/export.c -lm
+```
+
+Build on Plan 9:
+```rc
+6c export.c && 6l -o export export.6
+```
 
 ---
 
@@ -310,45 +303,21 @@ int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) {
 
 ---
 
-## QEMU Setup
+## QEMU VM (for Linux host testing)
 
-### First-Time Setup
-
-```bash
-# Install 9front (automated)
-./qemu/install-9front.sh
-
-# Create shared disk
-./qemu/create-shared.sh
-```
-
-### Starting QEMU Manually
-
-```bash
-./qemu/run-qemu.sh
-```
+The test harness manages QEMU automatically. For manual debugging:
 
 ### Boot Sequence
 
-1. `bootargs` prompt → Press Enter (accept default)
-2. `user` prompt → Press Enter (accept default: glenda)
+1. `bootargs` prompt -> Press Enter (accept default)
+2. `user` prompt -> Press Enter (accept default: glenda)
 3. Reach `term%` prompt (rc shell)
 
 ### Mounting Shared Disk in Plan 9
 
 ```rc
-dossrv -f /dev/sdG0/dos shared
+dossrv -f /dev/sdG0/data shared
 mount -c /srv/shared /mnt/host
-```
-
-(This is done automatically by `run-cmd.sh`)
-
-### Resizing Shared Disk
-
-```bash
-# Remove old disk and recreate with new size
-rm qemu/shared.img
-./qemu/create-shared.sh 256  # Size in MB
 ```
 
 ---
@@ -357,18 +326,11 @@ rm qemu/shared.img
 
 ### "file does not exist" in Plan 9
 
-The shared disk may not be mounted. Check:
-```bash
-./qemu/run-cmd.sh "ls /mnt/host"
+The shared disk may not be mounted. Mount it manually:
+```rc
+dossrv -f /dev/sdG0/data shared
+mount -c /srv/shared /mnt/host
 ```
-
-If empty, the mount failed. Try restarting QEMU.
-
-### "No space left on device"
-
-The shared disk is full. Either:
-1. Remove files from the shared disk
-2. Create a larger shared disk (see above)
 
 ### Compilation errors about missing functions
 

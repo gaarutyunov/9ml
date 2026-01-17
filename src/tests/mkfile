@@ -1,0 +1,21 @@
+</$objtype/mkfile
+
+TESTS=\
+	test_rmsnorm\
+	test_softmax\
+	test_matmul\
+	test_rng\
+	test_quantize\
+	test_quantized_matmul\
+	test_model_loading\
+
+all:V: $TESTS
+
+%: %.$O
+	$LD -o $target $prereq
+
+%.$O: %.c
+	$CC $CFLAGS $stem.c
+
+clean:V:
+	rm -f *.$O $TESTS *.out

@@ -27,7 +27,12 @@ env/
 # Compiled binaries
 run
 runq
+export
 test_load_host
+
+# Test harness
+test/harness
+*.out
 
 # Logs
 logs/
