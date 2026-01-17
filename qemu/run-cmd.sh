@@ -101,7 +101,8 @@ expect {
 sleep 1
 
 # Mount the FAT shared disk at /mnt/host
-send "dossrv -f /dev/sdG0/dos shared\r"
+# Use /dev/sdG0/data for raw FAT images (no partition table)
+send "dossrv -f /dev/sdG0/data shared\r"
 expect {
     -re "term%" { }
     -re ";" { }

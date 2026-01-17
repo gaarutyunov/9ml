@@ -20,31 +20,45 @@ if [ ! -f "$SHARED_IMG" ]; then
     exit 1
 fi
 
-# Mount the FAT image
-MOUNT_POINT=$(mktemp -d /tmp/shared_mount.XXXXXX)
-mount_fat_image "$SHARED_IMG" "$MOUNT_POINT"
+OS_TYPE="$(detect_os)"
 
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to mount $SHARED_IMG"
-    rmdir "$MOUNT_POINT"
-    exit 1
-fi
+if [ "$OS_TYPE" = "linux" ]; then
+    # Use mtools on Linux (no sudo required)
+    for file in "$@"; do
+        if [ -f "$file" ]; then
+            copy_to_fat "$SHARED_IMG" "$file"
+            echo "Copied: $file"
+        else
+            echo "Warning: $file not found"
+        fi
+    done
+else
+    # Use mount on macOS
+    MOUNT_POINT=$(mktemp -d /tmp/shared_mount.XXXXXX)
+    mount_fat_image "$SHARED_IMG" "$MOUNT_POINT"
 
-# Copy files
-for file in "$@"; do
-    if [ -f "$file" ]; then
-        cp "$file" "$MOUNT_POINT/"
-        echo "Copied: $file"
-    elif [ -d "$file" ]; then
-        cp -r "$file" "$MOUNT_POINT/"
-        echo "Copied directory: $file"
-    else
-        echo "Warning: $file not found"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to mount $SHARED_IMG"
+        rmdir "$MOUNT_POINT"
+        exit 1
     fi
-done
 
-# Unmount
-unmount_fat_image "$MOUNT_POINT"
-rmdir "$MOUNT_POINT" 2>/dev/null
+    # Copy files
+    for file in "$@"; do
+        if [ -f "$file" ]; then
+            cp "$file" "$MOUNT_POINT/"
+            echo "Copied: $file"
+        elif [ -d "$file" ]; then
+            cp -r "$file" "$MOUNT_POINT/"
+            echo "Copied directory: $file"
+        else
+            echo "Warning: $file not found"
+        fi
+    done
+
+    # Unmount
+    unmount_fat_image "$MOUNT_POINT"
+    rmdir "$MOUNT_POINT" 2>/dev/null
+fi
 
 echo "Done. Files are now in the shared disk."

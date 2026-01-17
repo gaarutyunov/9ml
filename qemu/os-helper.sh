@@ -56,6 +56,31 @@ get_qemu_accel() {
     esac
 }
 
+# Copy file to FAT image using mtools
+copy_to_fat() {
+    local img="$1"
+    local src="$2"
+
+    mcopy -i "$img" -o "$src" ::
+}
+
+# Copy file from FAT image using mtools
+copy_from_fat() {
+    local img="$1"
+    local src="$2"
+    local dest="$3"
+
+    mcopy -i "$img" "::$src" "$dest"
+}
+
+# Delete file from FAT image using mtools
+delete_from_fat() {
+    local img="$1"
+    local file="$2"
+
+    mdel -i "$img" "::$file" 2>/dev/null || true
+}
+
 mount_fat_image() {
     local img="$1"
     local mount_point="$2"
