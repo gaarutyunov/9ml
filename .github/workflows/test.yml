@@ -25,15 +25,13 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install 9front
+      - name: Download 9front image
         run: ./qemu/install-9front.sh
 
       - name: Download model weights
         run: |
-          # Download TinyStories 15M model
           curl -L -o stories15M.bin \
             "https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin"
-          # Download tokenizer
           curl -L -o tokenizer.bin \
             "https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin"
 
