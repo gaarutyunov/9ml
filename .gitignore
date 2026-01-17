@@ -1,0 +1,49 @@
+# Model weights
+*.bin
+*.pt
+
+# QEMU disk images
+*.qcow2
+*.qcow2.gz
+*.img
+*.iso
+*.iso.gz
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+.venv/
+
+# Plan 9 object files
+*.6
+*.8
+
+# Compiled binaries
+run
+runq
+test_load_host
+
+# Logs
+logs/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Temporary files
+/tmp/
+*.tmp

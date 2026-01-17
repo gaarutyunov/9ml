@@ -1,0 +1,664 @@
+[
+  {
+    "id": 1,
+    "category": "qemu",
+    "description": "Download 9front ISO",
+    "steps": [
+      "Download latest 9front ISO from 9front.org",
+      "Verify download completed",
+      "Store in qemu/ directory"
+    ],
+    "passes": true
+  },
+  {
+    "id": 2,
+    "category": "qemu",
+    "description": "Create QEMU disk image",
+    "steps": [
+      "Run: qemu-img create -f qcow2 qemu/9front.qcow2 4G",
+      "Verify image file exists",
+      "Verify image is correct size"
+    ],
+    "passes": true
+  },
+  {
+    "id": 3,
+    "category": "qemu",
+    "description": "Script automated 9front installation",
+    "steps": [
+      "Create install script using expect or heredoc",
+      "Script must complete without human interaction",
+      "Handle all installation prompts automatically"
+    ],
+    "passes": true
+  },
+  {
+    "id": 4,
+    "category": "qemu",
+    "description": "Boot 9front in QEMU and reach rc shell",
+    "steps": [
+      "Start QEMU with installed disk",
+      "System boots to rc shell",
+      "Can execute basic commands"
+    ],
+    "passes": true
+  },
+  {
+    "id": 5,
+    "category": "qemu",
+    "description": "Configure virtio-9p file sharing",
+    "steps": [
+      "Add virtio-9p device to QEMU command",
+      "Configure mount tag as 'host'",
+      "Create shared/ directory on host"
+    ],
+    "passes": true
+  },
+  {
+    "id": 6,
+    "category": "qemu",
+    "description": "Mount 9p share in Plan 9",
+    "steps": [
+      "Mount 9p share at /mnt/host in Plan 9",
+      "Create file on host, verify visible in Plan 9",
+      "Create file in Plan 9, verify visible on host"
+    ],
+    "passes": true
+  },
+  {
+    "id": 7,
+    "category": "qemu",
+    "description": "Verify Plan 9 C compiler available",
+    "steps": [
+      "Run: 8c -v or which 8c in Plan 9",
+      "Verify compiler exists and is executable"
+    ],
+    "passes": true
+  },
+  {
+    "id": 8,
+    "category": "qemu",
+    "description": "Verify Plan 9 linker available",
+    "steps": [
+      "Run: 8l in Plan 9",
+      "Verify linker exists and is executable"
+    ],
+    "passes": true
+  },
+  {
+    "id": 9,
+    "category": "qemu",
+    "description": "Compile and run hello world in Plan 9",
+    "steps": [
+      "Write hello.c with Plan 9 headers",
+      "Compile: 6c hello.c (amd64) or 8c hello.c (386)",
+      "Link: 6l -o hello hello.6 (amd64)",
+      "Run: ./hello",
+      "Verify output is 'hello, world'"
+    ],
+    "passes": true
+  },
+  {
+    "id": 10,
+    "category": "qemu",
+    "description": "Create run-cmd.sh automation script",
+    "steps": [
+      "Script takes command as argument",
+      "Executes command in Plan 9 via QEMU",
+      "Captures and returns output",
+      "Works without human interaction"
+    ],
+    "passes": true
+  },
+  {
+    "id": 11,
+    "category": "infra",
+    "description": "Create src/run.c with Plan 9 headers",
+    "steps": [
+      "Copy ../run.c to src/run.c",
+      "Replace headers with #include <u.h> and #include <libc.h>",
+      "Remove POSIX-specific includes"
+    ],
+    "passes": true
+  },
+  {
+    "id": 12,
+    "category": "infra",
+    "description": "Test Plan 9 headers compile",
+    "steps": [
+      "Create minimal test with Plan 9 headers",
+      "Compile in Plan 9 with 6c (amd64)",
+      "Verify no compilation errors"
+    ],
+    "passes": true
+  },
+  {
+    "id": 13,
+    "category": "infra",
+    "description": "Replace mmap with file-based loading",
+    "steps": [
+      "Replace mmap() call with open/read",
+      "Allocate buffer with malloc",
+      "Read entire file into buffer",
+      "Replace munmap() with free()"
+    ],
+    "passes": true
+  },
+  {
+    "id": 14,
+    "category": "infra",
+    "description": "Test file loading matches reference",
+    "steps": [
+      "Load model file on host, print first 100 floats",
+      "Load model file in Plan 9, print first 100 floats",
+      "Compare outputs - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 15,
+    "category": "infra",
+    "description": "Replace clock_gettime with Plan 9 nsec",
+    "steps": [
+      "Replace clock_gettime with nsec()",
+      "Convert nanoseconds to milliseconds",
+      "Update time_in_ms() function"
+    ],
+    "passes": true
+  },
+  {
+    "id": 16,
+    "category": "infra",
+    "description": "Test timing function works",
+    "steps": [
+      "Call time_in_ms() twice with delay",
+      "Verify difference is reasonable",
+      "Run on both host and Plan 9, compare behavior"
+    ],
+    "passes": true
+  },
+  {
+    "id": 17,
+    "category": "math",
+    "description": "Port rmsnorm function",
+    "steps": [
+      "Copy rmsnorm from original",
+      "Adapt for Plan 9 if needed",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 18,
+    "category": "math",
+    "description": "Test rmsnorm output matches reference",
+    "steps": [
+      "Create test with fixed input: [1.0, 2.0, 3.0, 4.0]",
+      "Create test with fixed weights: [0.5, 0.5, 0.5, 0.5]",
+      "Run on host, capture output",
+      "Run in Plan 9, capture output",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 19,
+    "category": "math",
+    "description": "Port softmax function",
+    "steps": [
+      "Copy softmax from original",
+      "Adapt for Plan 9 if needed",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 20,
+    "category": "math",
+    "description": "Test softmax output matches reference",
+    "steps": [
+      "Create test with fixed input: [1.0, 2.0, 3.0, 4.0, 5.0]",
+      "Run on host, capture output",
+      "Run in Plan 9, capture output",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 21,
+    "category": "math",
+    "description": "Port matmul function",
+    "steps": [
+      "Copy matmul from original",
+      "Remove #pragma omp directive",
+      "Adapt for Plan 9",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 22,
+    "category": "math",
+    "description": "Test matmul output matches reference",
+    "steps": [
+      "Create test with small matrices",
+      "W: 3x4 matrix, x: 4-element vector",
+      "Run on host, capture output",
+      "Run in Plan 9, capture output",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 23,
+    "category": "transformer",
+    "description": "Port token embedding lookup",
+    "steps": [
+      "Implement embedding table access",
+      "memcpy token row to activation buffer",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 24,
+    "category": "transformer",
+    "description": "Test embedding lookup matches reference",
+    "steps": [
+      "Load model weights",
+      "Look up embedding for token 42",
+      "Run on host, capture embedding vector",
+      "Run in Plan 9, capture embedding vector",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 25,
+    "category": "transformer",
+    "description": "Port RoPE positional encoding",
+    "steps": [
+      "Copy RoPE code from original",
+      "Uses sin/cos - verify math.h equivalent works",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 26,
+    "category": "transformer",
+    "description": "Test RoPE matches reference",
+    "steps": [
+      "Create test with q,k vectors and position 5",
+      "Apply RoPE rotation",
+      "Run on host, capture rotated vectors",
+      "Run in Plan 9, capture rotated vectors",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 27,
+    "category": "transformer",
+    "description": "Port attention mechanism",
+    "steps": [
+      "Port Q*K dot product scoring",
+      "Port softmax on attention scores",
+      "Port weighted sum of V",
+      "Remove #pragma omp from attention loop",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 28,
+    "category": "transformer",
+    "description": "Test attention output matches reference",
+    "steps": [
+      "Load model, run attention for layer 0, head 0",
+      "Use fixed token and position",
+      "Run on host, capture attention output",
+      "Run in Plan 9, capture attention output",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 29,
+    "category": "transformer",
+    "description": "Port FFN with SwiGLU activation",
+    "steps": [
+      "Port w1 matmul",
+      "Port SiLU activation",
+      "Port w3 matmul and elementwise multiply",
+      "Port w2 matmul",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 30,
+    "category": "transformer",
+    "description": "Test FFN output matches reference",
+    "steps": [
+      "Load model, run FFN for layer 0",
+      "Use fixed input activation",
+      "Run on host, capture FFN output",
+      "Run in Plan 9, capture FFN output",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 31,
+    "category": "transformer",
+    "description": "Port complete forward() function",
+    "steps": [
+      "Combine all transformer components",
+      "Port residual connections",
+      "Port final rmsnorm",
+      "Port classifier matmul",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 32,
+    "category": "transformer",
+    "description": "Test forward() logits match reference",
+    "steps": [
+      "Load model, run forward for token 1 at position 0",
+      "Run on host, capture logits (first 10 values)",
+      "Run in Plan 9, capture logits (first 10 values)",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 33,
+    "category": "tokenizer",
+    "description": "Port build_tokenizer function",
+    "steps": [
+      "Port tokenizer file loading",
+      "Allocate vocab arrays",
+      "Load vocab and scores",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 34,
+    "category": "tokenizer",
+    "description": "Test tokenizer loading",
+    "steps": [
+      "Load tokenizer.bin",
+      "Print vocab_size and max_token_length",
+      "Run on host, capture values",
+      "Run in Plan 9, capture values",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 35,
+    "category": "tokenizer",
+    "description": "Port encode function",
+    "steps": [
+      "Port BPE encoding logic",
+      "Port UTF-8 handling",
+      "Port merge loop",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 36,
+    "category": "tokenizer",
+    "description": "Test encode matches reference",
+    "steps": [
+      "Encode 'hello world' string",
+      "Run on host, capture token IDs",
+      "Run in Plan 9, capture token IDs",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 37,
+    "category": "tokenizer",
+    "description": "Port decode function",
+    "steps": [
+      "Port token to string conversion",
+      "Handle byte tokens",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 38,
+    "category": "tokenizer",
+    "description": "Test decode matches reference",
+    "steps": [
+      "Decode token sequence [1, 15043, 3186]",
+      "Run on host, capture decoded string",
+      "Run in Plan 9, capture decoded string",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 39,
+    "category": "sampler",
+    "description": "Port random_u32 and random_f32",
+    "steps": [
+      "Port XORshift RNG implementation",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 40,
+    "category": "sampler",
+    "description": "Test RNG sequence matches reference",
+    "steps": [
+      "Initialize RNG with seed 42",
+      "Generate 10 random numbers",
+      "Run on host, capture sequence",
+      "Run in Plan 9, capture sequence",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 41,
+    "category": "sampler",
+    "description": "Port sample_argmax function",
+    "steps": [
+      "Port greedy sampling implementation",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 42,
+    "category": "sampler",
+    "description": "Test argmax matches reference",
+    "steps": [
+      "Create test logits array",
+      "Run argmax on host, capture result",
+      "Run argmax in Plan 9, capture result",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 43,
+    "category": "sampler",
+    "description": "Port sample_topp function",
+    "steps": [
+      "Port nucleus sampling implementation",
+      "Port probability sorting",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 44,
+    "category": "sampler",
+    "description": "Test topp sampling matches reference",
+    "steps": [
+      "Create test logits, use seed 42, topp=0.9",
+      "Run sampling on host, capture result",
+      "Run sampling in Plan 9, capture result",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 45,
+    "category": "quantize",
+    "description": "Port quantize and dequantize functions",
+    "steps": [
+      "Port float to int8 quantization",
+      "Port int8 to float dequantization",
+      "Port scaling factor computation",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 46,
+    "category": "quantize",
+    "description": "Test quantize/dequantize matches reference",
+    "steps": [
+      "Create test float array",
+      "Quantize, then dequantize",
+      "Run on host, capture result",
+      "Run in Plan 9, capture result",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 47,
+    "category": "quantize",
+    "description": "Port quantized matmul",
+    "steps": [
+      "Port int8 matrix multiplication",
+      "Port scaling factor handling",
+      "Remove #pragma omp",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 48,
+    "category": "quantize",
+    "description": "Test quantized matmul matches reference",
+    "steps": [
+      "Create quantized test matrices",
+      "Run matmul on host, capture result",
+      "Run matmul in Plan 9, capture result",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 49,
+    "category": "quantize",
+    "description": "Port quantized forward() from runq.c",
+    "steps": [
+      "Port runq.c forward function",
+      "Uses quantized weights and activations",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 50,
+    "category": "quantize",
+    "description": "Test quantized forward matches reference",
+    "steps": [
+      "Load quantized model",
+      "Run forward for token 1 at position 0",
+      "Run on host, capture logits",
+      "Run in Plan 9, capture logits",
+      "Compare - must match within epsilon"
+    ],
+    "passes": true
+  },
+  {
+    "id": 51,
+    "category": "integration",
+    "description": "Port generate() function",
+    "steps": [
+      "Port main generation loop",
+      "Port prompt encoding",
+      "Port token sampling loop",
+      "Port output decoding",
+      "Verify compiles"
+    ],
+    "passes": true
+  },
+  {
+    "id": 52,
+    "category": "integration",
+    "description": "Test generate() first 10 tokens match",
+    "steps": [
+      "Use prompt 'Once upon a time'",
+      "Use temperature 0 (greedy), seed 42",
+      "Generate 10 tokens on host, capture",
+      "Generate 10 tokens in Plan 9, capture",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 53,
+    "category": "integration",
+    "description": "Full build of run.c for Plan 9",
+    "steps": [
+      "Compile all components: 8c src/run.c",
+      "Link: 8l -o run run.8",
+      "Verify binary created",
+      "Verify binary is executable"
+    ],
+    "passes": true
+  },
+  {
+    "id": 54,
+    "category": "integration",
+    "description": "Full build of runq.c for Plan 9",
+    "steps": [
+      "Compile all components: 8c src/runq.c",
+      "Link: 8l -o runq runq.8",
+      "Verify binary created",
+      "Verify binary is executable"
+    ],
+    "passes": true
+  },
+  {
+    "id": 55,
+    "category": "integration",
+    "description": "End-to-end test run.c generates matching output",
+    "steps": [
+      "Run: ./run stories15M.bin -t 0 -s 42 -n 50",
+      "Run on host, capture full output",
+      "Run in Plan 9, capture full output",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  },
+  {
+    "id": 56,
+    "category": "integration",
+    "description": "End-to-end test runq.c generates matching output",
+    "steps": [
+      "Run: ./runq stories15M_q8.bin -t 0 -s 42 -n 50",
+      "Run on host, capture full output",
+      "Run in Plan 9, capture full output",
+      "Compare - must match exactly"
+    ],
+    "passes": true
+  }
+]

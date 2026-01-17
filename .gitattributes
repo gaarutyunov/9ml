@@ -1,0 +1,10 @@
+# Git LFS tracking rules for large binary files
+
+# 9front disk image
+*.qcow2 filter=lfs diff=lfs merge=lfs -text
+
+# Model and tokenizer files
+*.bin filter=lfs diff=lfs merge=lfs -text
+
+# Disk images
+*.img filter=lfs diff=lfs merge=lfs -text
