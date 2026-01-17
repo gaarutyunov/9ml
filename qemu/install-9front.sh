@@ -9,7 +9,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 QCOW2_FILE="$SCRIPT_DIR/9front.qcow2"
-ISO_URL="http://9front.org/iso/9front-10522.amd64.iso.gz"
+ISO_URL="http://9front.org/iso/9front-11321.amd64.iso.gz"
 ISO_FILE="$SCRIPT_DIR/9front.iso"
 
 source "$SCRIPT_DIR/os-helper.sh"
