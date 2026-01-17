@@ -3,98 +3,163 @@
 #
 # Usage: ./run-cmd.sh "command to execute"
 #
-# Uses simple shell with sleep delays instead of expect
+# Returns the output of the command
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DISK_IMAGE="$SCRIPT_DIR/9front.qcow2"
 SHARED_IMG="$SCRIPT_DIR/shared.img"
+SHARED_DIR="$SCRIPT_DIR/shared"
 
+# Source OS helper functions
 source "$SCRIPT_DIR/os-helper.sh"
 
+# Get platform-specific QEMU settings
 QEMU="$(get_qemu_path)"
 ACCEL="$(get_qemu_accel)"
 
 if [ -z "$1" ]; then
-    echo "Usage: $0 \"command to execute\"" >&2
+    echo "Usage: $0 \"command to execute\""
     exit 1
 fi
 
 CMD="$1"
-TIMEOUT="${2:-300}"
 
+# Check prerequisites
 if ! command -v "$QEMU" &> /dev/null; then
-    echo "Error: QEMU not found at $QEMU" >&2
+    echo "Error: QEMU not found at $QEMU"
     exit 1
 fi
 
 if [ ! -f "$DISK_IMAGE" ]; then
-    echo "Error: Disk image not found at $DISK_IMAGE" >&2
+    echo "Error: Disk image not found at $DISK_IMAGE"
     exit 1
 fi
 
-if [ ! -f "$SHARED_IMG" ]; then
-    echo "Error: Shared disk not found at $SHARED_IMG" >&2
-    exit 1
-fi
+# Ensure shared directory exists
+mkdir -p "$SHARED_DIR"
 
-# Create a FIFO for input
-INPUT_FIFO=$(mktemp -u /tmp/qemu-input.XXXXXX)
-mkfifo "$INPUT_FIFO"
+# Create expect script on the fly
+EXPECT_SCRIPT=$(mktemp /tmp/run-cmd.XXXXXX.exp)
+cat > "$EXPECT_SCRIPT" << EXPECT_EOF
+#!/usr/bin/expect -f
 
-# Start QEMU in background with serial I/O through the FIFO
-"$QEMU" \
-    -m 512 \
-    -cpu max \
-    -accel "$ACCEL" \
-    -drive file="$DISK_IMAGE",format=qcow2,if=virtio \
-    -drive file="$SHARED_IMG",format=raw,if=virtio \
-    -display none \
-    -serial mon:stdio < "$INPUT_FIFO" &
+set timeout 180
+set disk_image [lindex \$argv 0]
+set shared_img [lindex \$argv 1]
+set cmd [lindex \$argv 2]
+set qemu [lindex \$argv 3]
+set accel [lindex \$argv 4]
 
-QEMU_PID=$!
+log_user 0
 
-# Open the FIFO for writing (keeps it open)
-exec 3>"$INPUT_FIFO"
+spawn \$qemu \\
+    -m 512 \\
+    -cpu max \\
+    -accel \$accel \\
+    -drive file=\$disk_image,format=qcow2,if=virtio \\
+    -drive file=\$shared_img,format=raw,if=virtio \\
+    -display none \\
+    -serial mon:stdio
 
-# Function to send a line
-send() {
-    echo "$1" >&3
+# Wait for boot prompt and accept default
+expect {
+    -re "bootargs.*\\\[.*\\\]" {
+        send "\r"
+    }
+    timeout {
+        puts "TIMEOUT: waiting for bootargs"
+        exit 1
+    }
 }
 
-# Function to cleanup
-cleanup() {
-    exec 3>&-
-    rm -f "$INPUT_FIFO"
-    kill $QEMU_PID 2>/dev/null
-    wait $QEMU_PID 2>/dev/null
+# Wait for user prompt
+expect {
+    -re "user\\\[.*\\\]" {
+        send "\r"
+    }
+    timeout {
+        puts "TIMEOUT: waiting for user prompt"
+        exit 1
+    }
 }
-trap cleanup EXIT
 
-# Wait for boot and send responses
-sleep 20  # Wait for bootargs prompt
-send ""   # Accept default bootargs
+# Wait for rc shell prompt
+expect {
+    -re "term%" {
+        # At shell
+    }
+    -re ";" {
+        # At shell (different prompt)
+    }
+    timeout {
+        puts "TIMEOUT: waiting for shell"
+        exit 1
+    }
+}
 
-sleep 3   # Wait for user prompt
-send ""   # Accept default user (glenda)
+# Small delay to ensure shell is ready
+sleep 1
 
-sleep 10  # Wait for shell
+# Mount the FAT shared disk at /mnt/host
+send "dossrv -f /dev/sdG0/dos shared\r"
+expect {
+    -re "term%" { }
+    -re ";" { }
+    timeout { }
+}
+sleep 1
+send "mount -c /srv/shared /mnt/host\r"
+expect {
+    -re "term%" { }
+    -re ";" { }
+    timeout { }
+}
+sleep 1
 
-# Mount shared disk
-send "dossrv -f /dev/sdG0/dos shared >/dev/null >[2=1]"
-sleep 2
-send "mount -c /srv/shared /mnt/host"
-sleep 2
+# Execute the command
+send "\$cmd\r"
 
-# Run command
-send "$CMD"
-sleep 5
+# Capture output until next prompt
+log_user 1
+expect {
+    -re "term%" {
+        # Command completed
+    }
+    -re "\n;" {
+        # Command completed (different prompt)
+    }
+    timeout {
+        puts "TIMEOUT: waiting for command completion"
+    }
+}
+log_user 0
 
 # Shutdown
-send "fshalt"
-sleep 3
-
-# Force quit QEMU via monitor
-send ""  # Ctrl-A
+send "fshalt\r"
+sleep 2
+send "\001x"
 sleep 1
+
+exit 0
+EXPECT_EOF
+
+chmod +x "$EXPECT_SCRIPT"
+
+# Run the expect script and filter output
+# Escape special characters in CMD for sed
+CMD_ESCAPED=$(printf '%s\n' "$CMD" | sed 's/[[\.*^$()+?{|]/\\&/g')
+OUTPUT=$("$EXPECT_SCRIPT" "$DISK_IMAGE" "$SHARED_IMG" "$CMD" "$QEMU" "$ACCEL" 2>/dev/null | \
+    grep -v "^spawn " | \
+    grep -v "^ $CMD_ESCAPED$" | \
+    sed '/^[[:space:]]*$/d')
+
+# Print output (remove prompt line at end)
+echo "$OUTPUT" | grep -v "^term%" | grep -v "^;$"
+
+# Cleanup
+rm -f "$EXPECT_SCRIPT"
+
+# Kill any remaining QEMU processes from this script
+pkill -f "qemu-system.*$DISK_IMAGE" 2>/dev/null
 
 exit 0
