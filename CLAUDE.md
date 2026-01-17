@@ -6,7 +6,7 @@ Port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front).
 
 1. **NEVER skip tests.** All tests are mandatory. If a test cannot run, fix the environment - do not skip.
 2. **All changes must be tested.** Run tests before committing:
-   - **Linux host:** `cd test && gcc -o harness *.c -lm && ./harness`
+   - **Linux host:** `make test` (or `cd test && gcc -o harness *.c -lm && ./harness`)
    - **Plan 9 native:** `mk` (compiles all targets)
 3. **Tests must pass.** Do not merge if tests fail.
 
@@ -17,7 +17,10 @@ Port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front).
 ### Running Tests (Linux Host)
 
 ```bash
-# Compile and run the test harness
+# Build and run all tests
+make test
+
+# Or manually:
 cd test
 gcc -o harness *.c -lm
 ./harness
@@ -91,9 +94,7 @@ mk clean      # Clean all build artifacts
 The test harness compiles and runs all tests in a Plan 9 QEMU VM:
 
 ```bash
-cd test
-gcc -o harness *.c -lm
-./harness
+make test
 ```
 
 **Requirements:**
@@ -110,9 +111,10 @@ gcc -o harness *.c -lm
 | matmul | Matrix multiplication |
 | rng | Random number generator (xorshift) |
 | model_loading | Config and weights loading |
-| generation | End-to-end text generation |
+| generation | End-to-end text generation (FP32) |
 | quantize | INT8 quantize/dequantize roundtrip |
 | quantized_matmul | Quantized matrix multiplication |
+| generation_quantized | End-to-end text generation (Q8_0, must match FP32) |
 
 ---
 

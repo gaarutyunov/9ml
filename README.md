@@ -7,77 +7,55 @@ A port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front). R
 - **FP32 inference** (`run.c`) - Full precision transformer inference
 - **INT8 quantized inference** (`runq.c`) - 4x smaller models with quantization
 - **Pure Plan 9 C** - No external dependencies, uses only Plan 9 libc
-- **Automated testing** - Test suite comparing Plan 9 output against reference
+- **Pure C test suite** - No Python or shell scripts required
+- **Cross-platform** - Build and test on Linux, run natively on Plan 9
 
 ## Prerequisites
-
-### macOS
-
-```bash
-# Install QEMU via MacPorts
-sudo port install qemu
-
-# Or via Homebrew
-brew install qemu
-```
 
 ### Linux (Ubuntu/Debian)
 
 ```bash
 sudo apt-get update
-sudo apt-get install qemu-system-x86 qemu-utils dosfstools expect
+sudo apt-get install qemu-system-x86 qemu-utils mtools curl gcc
 ```
 
 ### Linux (Fedora/RHEL)
 
 ```bash
-sudo dnf install qemu-system-x86 qemu-img dosfstools expect
+sudo dnf install qemu-system-x86 qemu-img mtools curl gcc
 ```
 
-## Setup
-
-### 1. Download 9front
-
-Download the 9front QEMU image from [9front.org](http://9front.org/iso/):
+### macOS
 
 ```bash
-# Download the latest 9front ISO
-curl -O http://9front.org/iso/9front-10522.amd64.iso.gz
-gunzip 9front-10522.amd64.iso.gz
+# Install via Homebrew
+brew install qemu mtools curl
 
-# Create a QEMU disk image and install 9front
-qemu-img create -f qcow2 qemu/9front.qcow2 4G
-qemu-system-x86_64 -m 512 -cpu max \
-    -drive file=qemu/9front.qcow2,format=qcow2 \
-    -cdrom 9front-10522.amd64.iso \
-    -boot d
+# Or via MacPorts
+sudo port install qemu mtools curl
 ```
 
-Follow the 9front installation prompts, then shut down and remove the `-cdrom` and `-boot` flags.
+## Quick Start
 
-Alternatively, use a pre-built 9front QCOW2 image if available.
-
-### 2. Create Shared Disk
+### Build and Test
 
 ```bash
-./qemu/create-shared.sh
+# Build everything and run tests
+make test
 ```
 
-This creates a 128MB FAT32 disk image for sharing files between host and Plan 9.
+The test harness automatically:
+1. Downloads 9front VM image if needed
+2. Creates a FAT shared disk
+3. Boots Plan 9 in QEMU
+4. Compiles and runs all tests inside Plan 9
+5. Compares output against C reference implementations
 
-### 3. Download Model Weights
-
-Download the TinyStories models from Hugging Face:
+### Download Model Weights
 
 ```bash
 # Small model (60MB) - good for testing
 wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
-
-# Medium model (168MB)
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories42M.bin
-
-# Large model (440MB)
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories110M.bin
 
 # Tokenizer (required)
 wget https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin
@@ -85,35 +63,26 @@ wget https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin
 
 ## Running Inference
 
-### Quick Start
-
-```bash
-# Copy source and model to shared disk
-./qemu/copy-to-shared.sh src/run.c stories15M.bin tokenizer.bin
-
-# Compile and run in Plan 9
-./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin -z tokenizer.bin -n 50"
-```
-
 ### FP32 Inference
 
-```bash
-./qemu/run-cmd.sh "./run /mnt/host/stories15M.bin -z /mnt/host/tokenizer.bin -n 100 -i 'Once upon a time'"
+In Plan 9:
+```rc
+6c -w run.c && 6l -o run run.6
+./run stories15M.bin -z tokenizer.bin -n 50 -i 'Once upon a time'
 ```
 
 ### INT8 Quantized Inference
 
-First, export a quantized model (requires Python):
-
+First, quantize the model (on Linux):
 ```bash
-python export.py stories15M_q80.bin --version 2 --checkpoint stories15M.pt
+make export
+./export quantize stories15M.bin stories15M_q80.bin
 ```
 
-Then run:
-
-```bash
-./qemu/copy-to-shared.sh src/runq.c stories15M_q80.bin tokenizer.bin
-./qemu/run-cmd.sh "cd /mnt/host && 6c -w runq.c && 6l -o runq runq.6 && ./runq stories15M_q80.bin -z tokenizer.bin -n 50"
+Then run in Plan 9:
+```rc
+6c -w runq.c && 6l -o runq runq.6
+./runq stories15M_q80.bin -z tokenizer.bin -n 50
 ```
 
 ### Command Line Options
@@ -128,31 +97,50 @@ Then run:
 | `-z <string>` | Path to tokenizer |
 | `-m generate\|chat` | Mode (default: generate) |
 
-## Running Tests
+## Model Export Tool
 
 ```bash
-python3 tests/run_tests.py
-```
+# Build the export tool
+make export
 
-The test suite runs component tests comparing Plan 9 output against Python reference implementations.
+# Show model info
+./export info stories15M.bin
+
+# Quantize FP32 model to Q8_0
+./export quantize stories15M.bin stories15M_q80.bin
+```
 
 ## Project Structure
 
 ```
 9ml/
 ├── src/
-│   ├── run.c          # FP32 inference
-│   └── runq.c         # INT8 quantized inference
-├── tests/
-│   └── run_tests.py   # Automated test suite
+│   ├── run.c              # FP32 inference
+│   ├── runq.c             # INT8 quantized inference
+│   ├── model.c            # Model loading helpers
+│   ├── modelq.c           # Quantized model helpers
+│   ├── export.c           # Model export/conversion tool
+│   ├── mkfile             # Plan 9 build file
+│   └── tests/             # Plan 9 test source files
+├── test/                  # C test harness (Linux host)
+│   ├── harness.c          # Main test driver
+│   ├── reference.c/h      # Reference implementations
+│   ├── qemu.c/h           # QEMU VM management
+│   └── fat.c/h            # FAT disk operations
 ├── qemu/
-│   ├── 9front.qcow2   # 9front disk image (not included)
-│   ├── shared.img     # FAT32 shared disk (created by script)
-│   ├── run-cmd.sh     # Execute commands in Plan 9
-│   ├── copy-to-shared.sh    # Copy files to shared disk
-│   ├── create-shared.sh     # Create shared disk image
-│   └── os-helper.sh   # Cross-platform helper functions
-└── CLAUDE.md          # Development documentation
+│   ├── 9front.qcow2       # VM disk image (auto-downloaded)
+│   └── shared.img         # FAT disk for file sharing
+├── Makefile               # Linux build file
+├── mkfile                 # Root Plan 9 build file
+└── CLAUDE.md              # Development documentation
+```
+
+## Building in Plan 9
+
+Clone the repo and build natively:
+```rc
+mk            # Build all: run, runq, export, tests
+mk clean      # Clean all build artifacts
 ```
 
 ## Plan 9 Notes
