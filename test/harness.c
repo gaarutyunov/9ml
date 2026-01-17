@@ -20,6 +20,7 @@
 #define DISK_IMAGE   QEMU_DIR "/9front.qcow2"
 #define SHARED_IMAGE QEMU_DIR "/shared.img"
 #define MODEL_FILE   "../stories15M.bin"
+#define MODEL_Q_FILE "../stories15M_q80.bin"
 #define TOKENIZER_FILE "../tokenizer.bin"
 
 /* Epsilon for float comparisons */
@@ -34,7 +35,7 @@ typedef struct {
     char error[256];
 } TestResult;
 
-static TestResult results[10];
+static TestResult results[12];
 static int num_results = 0;
 static QemuVM vm;
 
@@ -72,6 +73,7 @@ static int prepare_shared_disk(void) {
         SRC_DIR "/model.c",
         SRC_DIR "/modelq.c",
         SRC_DIR "/run.c",
+        SRC_DIR "/runq.c",
         TESTS_DIR "/test_rmsnorm.c",
         TESTS_DIR "/test_softmax.c",
         TESTS_DIR "/test_matmul.c",
@@ -96,6 +98,11 @@ static int prepare_shared_disk(void) {
     if (file_exists(MODEL_FILE)) {
         if (fat_copy_to(SHARED_IMAGE, MODEL_FILE, "stories15M.bin") != 0) {
             fprintf(stderr, "Warning: failed to copy model file\n");
+        }
+    }
+    if (file_exists(MODEL_Q_FILE)) {
+        if (fat_copy_to(SHARED_IMAGE, MODEL_Q_FILE, "stories15M_q80.bin") != 0) {
+            fprintf(stderr, "Warning: failed to copy quantized model file\n");
         }
     }
     if (file_exists(TOKENIZER_FILE)) {
@@ -163,6 +170,11 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w run.c", 45);
     run_vm_cmd("6l -o run run.6", 20);
     run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 > generation.out >[2=1]", 120);
+
+    /* Quantized generation test (runq.c with Q8_0 model) */
+    run_vm_cmd("6c -w runq.c", 45);
+    run_vm_cmd("6l -o runq runq.6", 20);
+    run_vm_cmd("./runq stories15M_q80.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 > generation_q.out >[2=1]", 120);
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -558,6 +570,54 @@ static void test_generation(void) {
     free(data);
 }
 
+/* Test: generation_quantized (runq with Q8_0 model) */
+static void test_generation_quantized(void) {
+    printf("Testing generation_quantized... ");
+
+    if (!file_exists(MODEL_Q_FILE) || !file_exists(TOKENIZER_FILE)) {
+        add_result("generation_quantized", 0, 1, "quantized model or tokenizer not found");
+        printf("SKIP (quantized model or tokenizer not found)\n");
+        return;
+    }
+
+    /* Read FP32 output for comparison */
+    int fp32_size;
+    char *fp32_data = fat_read_file(SHARED_IMAGE, "generation.out", &fp32_size);
+    if (!fp32_data || fp32_size == 0) {
+        add_result("generation_quantized", 0, 1, "no FP32 output to compare");
+        printf("SKIP (no FP32 output to compare)\n");
+        free(fp32_data);
+        return;
+    }
+
+    /* Read quantized output */
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "generation_q.out", &size);
+    if (!data || size == 0) {
+        add_result("generation_quantized", 0, 0, "no output file");
+        printf("FAIL (no output)\n");
+        free(fp32_data);
+        free(data);
+        return;
+    }
+
+    /* Extract first line (the generated text, before tok/s stats) */
+    char *fp32_line = strtok(fp32_data, "\n");
+    char *q_line = strtok(data, "\n");
+
+    if (fp32_line && q_line && strcmp(fp32_line, q_line) == 0) {
+        add_result("generation_quantized", 1, 0, NULL);
+        printf("PASS (matches FP32)\n");
+    } else {
+        add_result("generation_quantized", 0, 0, "output differs from FP32");
+        printf("FAIL (output differs from FP32)\n");
+        if (fp32_line) printf("  FP32: %.50s...\n", fp32_line);
+        if (q_line) printf("  Q8_0: %.50s...\n", q_line);
+    }
+    free(fp32_data);
+    free(data);
+}
+
 /* Print summary */
 static void print_summary(void) {
     printf("\n==================================================\n");
@@ -639,6 +699,7 @@ int main(int argc, char *argv[]) {
     test_quantized_matmul();
     test_model_loading();
     test_generation();
+    test_generation_quantized();
 
     print_summary();
 

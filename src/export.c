@@ -397,31 +397,57 @@ static int cmd_quantize(const char *in_path, const char *out_path) {
     memcpy(outp, rms_final, rms_final_size * sizeof(float));
     outp += rms_final_size * sizeof(float);
 
-    /* Write quantized weights */
-#define WRITE_QUANT(src, n) do { \
+    /* Write quantized weights - format is [q values][scales] for each tensor */
+    /* Helper to write one quantized tensor */
+#define WRITE_QUANT_TENSOR(src, size) do { \
     schar *q = (schar*)outp; \
-    float *s = (float*)(outp + (n)); \
-    quantize(q, s, src, n, GS); \
-    outp += (n) + ((n) / GS) * sizeof(float); \
+    float *s = (float*)(outp + (size)); \
+    quantize(q, s, src, size, GS); \
+    outp += (size) + ((size) / GS) * sizeof(float); \
 } while(0)
 
     print("  Quantizing token embeddings...\n");
-    WRITE_QUANT(tok_emb, tok_emb_size);
+    WRITE_QUANT_TENSOR(tok_emb, tok_emb_size);
+
+    /* Per-layer sizes */
+    int dim = c.dim;
+    int kv_dim = (c.dim * c.n_kv_heads) / c.n_heads;
+    uvlong wq_layer_size = dim * dim;
+    uvlong wk_layer_size = dim * kv_dim;
+    uvlong wv_layer_size = dim * kv_dim;
+    uvlong wo_layer_size = dim * dim;
+    uvlong w1_layer_size = dim * c.hidden_dim;
+    uvlong w2_layer_size = c.hidden_dim * dim;
+    uvlong w3_layer_size = dim * c.hidden_dim;
 
     print("  Quantizing attention weights...\n");
-    WRITE_QUANT(wq, wq_size);
-    WRITE_QUANT(wk, wk_size);
-    WRITE_QUANT(wv, wv_size);
-    WRITE_QUANT(wo, wo_size);
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(wq + l * wq_layer_size, wq_layer_size);
+    }
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(wk + l * wk_layer_size, wk_layer_size);
+    }
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(wv + l * wv_layer_size, wv_layer_size);
+    }
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(wo + l * wo_layer_size, wo_layer_size);
+    }
 
     print("  Quantizing FFN weights...\n");
-    WRITE_QUANT(w1, w1_size);
-    WRITE_QUANT(w2, w2_size);
-    WRITE_QUANT(w3, w3_size);
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(w1 + l * w1_layer_size, w1_layer_size);
+    }
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(w2 + l * w2_layer_size, w2_layer_size);
+    }
+    for (int l = 0; l < c.n_layers; l++) {
+        WRITE_QUANT_TENSOR(w3 + l * w3_layer_size, w3_layer_size);
+    }
 
     if (!shared_weights) {
         print("  Quantizing classifier...\n");
-        WRITE_QUANT(wcls, wcls_size);
+        WRITE_QUANT_TENSOR(wcls, c.dim * c.vocab_size);
     }
 
     /* Write output */
