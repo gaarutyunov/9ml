@@ -35,53 +35,58 @@ def detect_os():
 
 
 def mount_shared_disk():
-    """Mount the shared disk and return mount point"""
+    """Mount the shared disk and return mount point (or image path for mtools)"""
     shared_img = os.path.join(QEMU_DIR, "shared.img")
-    mount_point = tempfile.mkdtemp(prefix="shared_mount_")
-
     os_type = detect_os()
+
     if os_type == "macos":
+        mount_point = tempfile.mkdtemp(prefix="shared_mount_")
         subprocess.run([
             "hdiutil", "attach",
             "-imagekey", "diskimage-class=CRawDiskImage",
             "-mountpoint", mount_point,
             shared_img
         ], capture_output=True, check=True)
+        return {"type": "mount", "path": mount_point}
     elif os_type == "linux":
-        subprocess.run([
-            "sudo", "mount", "-o", f"loop,uid={os.getuid()},gid={os.getgid()}",
-            shared_img, mount_point
-        ], capture_output=True, check=True)
+        # Use mtools to read FAT32 image directly (no sudo required)
+        return {"type": "mtools", "path": shared_img}
     else:
         raise RuntimeError(f"Unsupported OS: {os_type}")
 
-    return mount_point
 
-
-def unmount_shared_disk(mount_point):
+def unmount_shared_disk(mount_info):
     """Unmount the shared disk"""
-    os_type = detect_os()
-    if os_type == "macos":
-        subprocess.run(["hdiutil", "detach", mount_point], capture_output=True)
-    elif os_type == "linux":
-        subprocess.run(["sudo", "umount", mount_point], capture_output=True)
+    if mount_info["type"] == "mount":
+        mount_point = mount_info["path"]
+        os_type = detect_os()
+        if os_type == "macos":
+            subprocess.run(["hdiutil", "detach", mount_point], capture_output=True)
+        try:
+            os.rmdir(mount_point)
+        except:
+            pass
+    # mtools doesn't need unmounting
 
-    try:
-        os.rmdir(mount_point)
-    except:
-        pass
 
-
-def read_output_file(mount_point, test_name):
-    """Read output file from mounted shared disk"""
-    output_file = os.path.join(mount_point, f"{test_name}.out")
-    if not os.path.exists(output_file):
-        return None
-
-    with open(output_file, 'r') as f:
-        content = f.read().strip()
-
-    return content
+def read_output_file(mount_info, test_name):
+    """Read output file from shared disk"""
+    if mount_info["type"] == "mount":
+        output_file = os.path.join(mount_info["path"], f"{test_name}.out")
+        if not os.path.exists(output_file):
+            return None
+        with open(output_file, 'r') as f:
+            return f.read().strip()
+    elif mount_info["type"] == "mtools":
+        # Use mcopy to extract file from FAT32 image
+        result = subprocess.run(
+            ["mcopy", "-i", mount_info["path"], f"::/{test_name}.out", "-"],
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip()
 
 
 def parse_floats(content):

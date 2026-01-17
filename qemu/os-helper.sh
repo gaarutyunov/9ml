@@ -56,6 +56,43 @@ get_qemu_accel() {
     esac
 }
 
+# Check if we should use mtools (Linux without sudo)
+use_mtools() {
+    [ "$(detect_os)" = "linux" ]
+}
+
+# Copy file to FAT image using mtools
+copy_to_fat() {
+    local img="$1"
+    local src="$2"
+
+    mcopy -i "$img" -o "$src" ::
+}
+
+# Copy file from FAT image using mtools
+copy_from_fat() {
+    local img="$1"
+    local src="$2"
+    local dest="$3"
+
+    mcopy -i "$img" "::$src" "$dest"
+}
+
+# Delete file from FAT image using mtools
+delete_from_fat() {
+    local img="$1"
+    local file="$2"
+
+    mdel -i "$img" "::$file" 2>/dev/null || true
+}
+
+# List files in FAT image using mtools
+list_fat() {
+    local img="$1"
+
+    mdir -i "$img" :: 2>/dev/null | grep -v "^$" | tail -n +3
+}
+
 mount_fat_image() {
     local img="$1"
     local mount_point="$2"
@@ -66,7 +103,9 @@ mount_fat_image() {
                 -mountpoint "$mount_point" "$img" > /dev/null
             ;;
         linux)
-            sudo mount -o loop,uid=$(id -u),gid=$(id -g) "$img" "$mount_point"
+            # On Linux, use mtools instead of mounting (no sudo needed)
+            # This function is kept for compatibility but doesn't actually mount
+            echo "Using mtools for FAT access (no mount needed)"
             ;;
         *)
             echo "Error: Unsupported OS for mounting" >&2
@@ -83,7 +122,8 @@ unmount_fat_image() {
             hdiutil detach "$mount_point" > /dev/null
             ;;
         linux)
-            sudo umount "$mount_point"
+            # No unmount needed when using mtools
+            :
             ;;
         *)
             echo "Error: Unsupported OS for unmounting" >&2

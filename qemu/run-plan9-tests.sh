@@ -41,27 +41,50 @@ if [ ! -f "$SHARED_IMG" ]; then
     "$SCRIPT_DIR/create-shared.sh"
 fi
 
-# Mount shared disk and copy files
+# Copy test files to shared disk
 echo "Copying test files to shared disk..."
-MOUNT_POINT=$(mktemp -d)
-mount_fat_image "$SHARED_IMG" "$MOUNT_POINT"
 
-# Clean old outputs
-rm -f "$MOUNT_POINT"/*.out 2>/dev/null || true
+if use_mtools; then
+    # Linux: use mtools (no sudo required)
+    # Clean old outputs
+    for f in $(mdir -i "$SHARED_IMG" -b :: 2>/dev/null | grep '\.out$'); do
+        mdel -i "$SHARED_IMG" "::$(basename $f)" 2>/dev/null || true
+    done
 
-# Copy test source files
-cp "$TESTS_DIR"/test_*.c "$MOUNT_POINT/"
-cp "$SRC_DIR"/model.c "$MOUNT_POINT/"
-cp "$SRC_DIR"/modelq.c "$MOUNT_POINT/" 2>/dev/null || true
-cp "$TESTS_DIR"/run_all.rc "$MOUNT_POINT/"
+    # Copy test source files
+    for f in "$TESTS_DIR"/test_*.c; do
+        mcopy -i "$SHARED_IMG" -o "$f" ::
+    done
+    mcopy -i "$SHARED_IMG" -o "$SRC_DIR"/model.c ::
+    [ -f "$SRC_DIR"/modelq.c ] && mcopy -i "$SHARED_IMG" -o "$SRC_DIR"/modelq.c ::
+    mcopy -i "$SHARED_IMG" -o "$TESTS_DIR"/run_all.rc ::
 
-# Copy model files if they exist
-[ -f "$PROJECT_DIR/stories15M.bin" ] && cp "$PROJECT_DIR/stories15M.bin" "$MOUNT_POINT/"
-[ -f "$PROJECT_DIR/tokenizer.bin" ] && cp "$PROJECT_DIR/tokenizer.bin" "$MOUNT_POINT/"
-[ -f "$SRC_DIR/run.c" ] && cp "$SRC_DIR/run.c" "$MOUNT_POINT/"
+    # Copy model files if they exist
+    [ -f "$PROJECT_DIR/stories15M.bin" ] && mcopy -i "$SHARED_IMG" -o "$PROJECT_DIR/stories15M.bin" ::
+    [ -f "$PROJECT_DIR/tokenizer.bin" ] && mcopy -i "$SHARED_IMG" -o "$PROJECT_DIR/tokenizer.bin" ::
+    [ -f "$SRC_DIR/run.c" ] && mcopy -i "$SHARED_IMG" -o "$SRC_DIR/run.c" ::
+else
+    # macOS: use hdiutil mount
+    MOUNT_POINT=$(mktemp -d)
+    mount_fat_image "$SHARED_IMG" "$MOUNT_POINT"
 
-unmount_fat_image "$MOUNT_POINT"
-rmdir "$MOUNT_POINT"
+    # Clean old outputs
+    rm -f "$MOUNT_POINT"/*.out 2>/dev/null || true
+
+    # Copy test source files
+    cp "$TESTS_DIR"/test_*.c "$MOUNT_POINT/"
+    cp "$SRC_DIR"/model.c "$MOUNT_POINT/"
+    cp "$SRC_DIR"/modelq.c "$MOUNT_POINT/" 2>/dev/null || true
+    cp "$TESTS_DIR"/run_all.rc "$MOUNT_POINT/"
+
+    # Copy model files if they exist
+    [ -f "$PROJECT_DIR/stories15M.bin" ] && cp "$PROJECT_DIR/stories15M.bin" "$MOUNT_POINT/"
+    [ -f "$PROJECT_DIR/tokenizer.bin" ] && cp "$PROJECT_DIR/tokenizer.bin" "$MOUNT_POINT/"
+    [ -f "$SRC_DIR/run.c" ] && cp "$SRC_DIR/run.c" "$MOUNT_POINT/"
+
+    unmount_fat_image "$MOUNT_POINT"
+    rmdir "$MOUNT_POINT"
+fi
 
 echo "Starting QEMU..."
 

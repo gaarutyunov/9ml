@@ -15,6 +15,15 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Verify dependencies
+        run: |
+          echo "Checking required tools..."
+          command -v qemu-system-x86_64 || { echo "Error: qemu-system-x86_64 not found"; exit 1; }
+          command -v mcopy || { echo "Error: mtools (mcopy) not found"; exit 1; }
+          command -v mkfs.vfat || { echo "Error: dosfstools (mkfs.vfat) not found"; exit 1; }
+          command -v python3 || { echo "Error: python3 not found"; exit 1; }
+          echo "All dependencies found"
+
       - name: Download 9front image
         run: ./qemu/install-9front.sh
 
