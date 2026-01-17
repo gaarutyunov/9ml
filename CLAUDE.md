@@ -2,15 +2,29 @@
 
 Port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front).
 
+## Rules
+
+1. **NEVER skip tests.** All tests are mandatory. If a test cannot run, fix the environment - do not skip.
+2. **All changes must be tested.** Run `python3 tests/run_tests.py` before committing.
+3. **CI must pass.** Do not merge if CI fails.
+
+---
+
 ## Quick Start
 
 ```bash
+# Install 9front (downloads ISO and installs automatically)
+./qemu/install-9front.sh
+
+# Create shared disk for file transfer
+./qemu/create-shared.sh
+
 # Run the test suite
 python3 tests/run_tests.py
 
 # Copy files to Plan 9 and run inference
-./qemu/copy-to-shared.sh src/run.c model.bin tokenizer.bin
-./qemu/run-cmd.sh "6c /mnt/host/run.c && 6l -o run run.6 && ./run /mnt/host/model.bin -z /mnt/host/tokenizer.bin"
+./qemu/copy-to-shared.sh src/run.c stories15M.bin tokenizer.bin
+./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin -z tokenizer.bin"
 ```
 
 ---
@@ -20,18 +34,33 @@ python3 tests/run_tests.py
 ```
 9ml/
 ├── src/
-│   ├── run.c          # FP32 inference (ported)
-│   └── runq.c         # INT8 quantized inference (ported)
+│   ├── run.c              # FP32 inference (ported)
+│   ├── runq.c             # INT8 quantized inference (ported)
+│   ├── model.c            # Model loading helpers
+│   ├── modelq.c           # Quantized model helpers
+│   └── tests/             # Plan 9 test source files
+│       ├── test_rmsnorm.c
+│       ├── test_softmax.c
+│       ├── test_matmul.c
+│       ├── test_rng.c
+│       ├── test_model_loading.c
+│       ├── test_quantize.c
+│       └── test_quantized_matmul.c
 ├── tests/
-│   └── run_tests.py   # Automated test suite
+│   └── run_tests.py       # Automated test suite (Python)
 ├── qemu/
-│   ├── 9front.qcow2   # 9front disk image
-│   ├── shared.img     # FAT32 shared disk (128MB)
-│   ├── run-cmd.sh     # Execute commands in Plan 9
-│   ├── run-qemu.sh    # Start QEMU manually
-│   ├── copy-to-shared.sh    # Copy files to shared disk
-│   └── copy-from-shared.sh  # Copy files from shared disk
-└── feature_list.json  # Task tracking (56/56 complete)
+│   ├── install-9front.sh  # Download and install 9front
+│   ├── create-shared.sh   # Create FAT32 shared disk
+│   ├── os-helper.sh       # Cross-platform helper functions
+│   ├── run-cmd.sh         # Execute commands in Plan 9
+│   ├── run-qemu.sh        # Start QEMU manually
+│   ├── copy-to-shared.sh  # Copy files to shared disk
+│   └── copy-from-shared.sh # Copy files from shared disk
+├── .github/
+│   └── workflows/
+│       └── test.yml       # CI workflow
+├── export.py              # Model export script
+└── model.py               # Model definitions
 ```
 
 ---
@@ -68,7 +97,7 @@ This script:
 ./qemu/run-cmd.sh "./myprogram arg1 arg2"
 
 # Chain commands
-./qemu/run-cmd.sh "6c /mnt/host/run.c && 6l -o run run.6 && ./run /mnt/host/model.bin"
+./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin"
 ```
 
 ---
@@ -96,21 +125,6 @@ Files are shared via a FAT32 disk image mounted at `/mnt/host` in Plan 9.
 ./qemu/copy-from-shared.sh /destination/directory/
 ```
 
-### Manual Access (macOS)
-
-```bash
-# Mount the shared disk on macOS
-hdiutil attach -mountpoint /tmp/shared qemu/shared.img
-
-# Access files
-ls /tmp/shared/
-
-# Unmount before running QEMU
-hdiutil detach /tmp/shared
-```
-
-**Important:** The shared disk cannot be mounted on both macOS and QEMU simultaneously.
-
 ---
 
 ## Running Tests
@@ -121,6 +135,8 @@ The test suite compares Plan 9 output against Python reference implementations.
 # Run all tests
 python3 tests/run_tests.py
 ```
+
+**All tests must pass. No exceptions.**
 
 ### Test Coverage
 
@@ -177,7 +193,7 @@ python3 tests/run_tests.py
 ./qemu/copy-to-shared.sh src/run.c stories15M.bin tokenizer.bin
 
 # Compile and run
-./qemu/run-cmd.sh "6c -w /mnt/host/run.c && 6l -o run run.6 && ./run /mnt/host/stories15M.bin -z /mnt/host/tokenizer.bin -n 50 -i 'Once upon a time'"
+./qemu/run-cmd.sh "cd /mnt/host && 6c -w run.c && 6l -o run run.6 && ./run stories15M.bin -z tokenizer.bin -n 50 -i 'Once upon a time'"
 ```
 
 ### INT8 Quantized Inference (runq.c)
@@ -191,7 +207,7 @@ Then run:
 ```bash
 ./qemu/copy-to-shared.sh src/runq.c stories15M_q80.bin tokenizer.bin
 
-./qemu/run-cmd.sh "6c -w /mnt/host/runq.c && 6l -o runq runq.6 && ./runq /mnt/host/stories15M_q80.bin -z /mnt/host/tokenizer.bin -n 50"
+./qemu/run-cmd.sh "cd /mnt/host && 6c -w runq.c && 6l -o runq runq.6 && ./runq stories15M_q80.bin -z tokenizer.bin -n 50"
 ```
 
 ### Command Line Options
@@ -294,21 +310,22 @@ int str_lookup(char *str, TokenIndex *sorted_vocab, int vocab_size) {
 
 ---
 
-## QEMU Setup Details
+## QEMU Setup
+
+### First-Time Setup
+
+```bash
+# Install 9front (automated)
+./qemu/install-9front.sh
+
+# Create shared disk
+./qemu/create-shared.sh
+```
 
 ### Starting QEMU Manually
 
 ```bash
 ./qemu/run-qemu.sh
-```
-
-Or directly:
-```bash
-/opt/local/bin/qemu-system-x86_64 \
-    -m 512 -cpu max -accel hvf \
-    -drive file=qemu/9front.qcow2,format=qcow2,if=virtio \
-    -drive file=qemu/shared.img,format=raw,if=virtio \
-    -display none -serial mon:stdio
 ```
 
 ### Boot Sequence
@@ -329,12 +346,9 @@ mount -c /srv/shared /mnt/host
 ### Resizing Shared Disk
 
 ```bash
-# Remove old disk
+# Remove old disk and recreate with new size
 rm qemu/shared.img
-
-# Create larger disk (e.g., 256MB)
-hdiutil create -size 256m -fs MS-DOS -volname SHARED qemu/shared.img
-mv qemu/shared.img.dmg qemu/shared.img
+./qemu/create-shared.sh 256  # Size in MB
 ```
 
 ---
