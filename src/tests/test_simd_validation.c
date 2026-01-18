@@ -1,7 +1,7 @@
 /* SIMD Validation Test
  *
  * Compares SIMD output directly against scalar baseline to verify correctness.
- * This test does NOT use DISABLE_THREADING so both matmul_simd and matmul_scalar
+ * This test does NOT use DISABLE_OPTIMIZATIONS so both matmul_simd and matmul_scalar
  * are available via opt_config.use_simd.
  */
 #include "model.c"

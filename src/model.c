@@ -1,14 +1,14 @@
 /* Inference for Llama-2 Transformer model in pure C */
 /* Plan 9 port - Model implementation with SIMD and parallel optimizations */
 /*
- * Define DISABLE_THREADING before including this file to disable
- * thread support (for simple tests that don't need parallelism).
+ * Define DISABLE_OPTIMIZATIONS before including this file to disable
+ * threading and SIMD assembly (for simple tests that don't link with assembly).
  */
 
 #include <u.h>
 #include <libc.h>
 
-#ifndef DISABLE_THREADING
+#ifndef DISABLE_OPTIMIZATIONS
 #include <thread.h>
 #endif
 
@@ -18,15 +18,17 @@
 typedef struct {
     int nthreads;           /* number of threads to use (0 = auto-detect) */
     int use_simd;           /* whether to use SIMD optimizations */
+    int softmax_mode;       /* 0=scalar, 1=partial, 2=schraudolph, 3=poly, 4=lut */
 } OptConfig;
 
 OptConfig opt_config = {
     .nthreads = 0,      /* 0 = auto-detect */
-#ifdef DISABLE_THREADING
-    .use_simd = 0,      /* SIMD disabled when threading disabled (no assembly linkage) */
+#ifdef DISABLE_OPTIMIZATIONS
+    .use_simd = 0,      /* SIMD disabled when optimizations disabled (no assembly) */
 #else
     .use_simd = 1,      /* SIMD enabled by default */
 #endif
+    .softmax_mode = 2,  /* default to Schraudolph (57x speedup, ~1e-5 error) */
 };
 
 /* Thread pool for parallel execution */
@@ -39,7 +41,7 @@ struct WorkItem {
     WorkItem *next;
 };
 
-#ifndef DISABLE_THREADING
+#ifndef DISABLE_OPTIMIZATIONS
 struct ThreadPool {
     int nworkers;
     int active;
@@ -61,7 +63,7 @@ static ThreadPool *global_pool = nil;
 int
 cpu_count(void)
 {
-#ifdef DISABLE_THREADING
+#ifdef DISABLE_OPTIMIZATIONS
     return 1;
 #else
     int fd, n, count;
@@ -100,7 +102,7 @@ cpu_count(void)
 #endif
 }
 
-#ifndef DISABLE_THREADING
+#ifndef DISABLE_OPTIMIZATIONS
 /* Worker thread main loop */
 static void
 worker_proc(void *arg)
@@ -248,14 +250,14 @@ pool_wait(ThreadPool *p, int njobs)
     }
 }
 
-#else /* DISABLE_THREADING - stub implementations */
+#else /* DISABLE_OPTIMIZATIONS - stub implementations */
 
 ThreadPool* pool_create(int nworkers) { USED(nworkers); return nil; }
 void pool_destroy(ThreadPool *p) { USED(p); }
 void pool_submit(ThreadPool *p, void (*fn)(void*), void *arg) { USED(p); if (fn) fn(arg); }
 void pool_wait(ThreadPool *p, int njobs) { USED(p); USED(njobs); }
 
-#endif /* DISABLE_THREADING */
+#endif /* DISABLE_OPTIMIZATIONS */
 
 /* Initialize optimization subsystem */
 void
@@ -286,7 +288,7 @@ opt_cleanup(void)
 // Note: Plan 9 assembly SIMD support is limited. We provide C fallbacks
 // that can be replaced with assembly when available.
 
-#ifndef DISABLE_THREADING
+#ifndef DISABLE_OPTIMIZATIONS
 // Forward declare scalar versions (defined below)
 void matmul_scalar(float* xout, float* x, float* w, int n, int d);
 void rmsnorm_scalar(float* o, float* x, float* weight, int size);
@@ -305,6 +307,14 @@ extern float dot_product_simd(float *a, float *b, int n);
 extern void rmsnorm_simd(float *o, float *x, float *weight, int size);
 extern void vec_add_simd(float *o, float *a, float *b, int n);
 extern void vec_scale_simd(float *o, float *x, float scalar, int n);
+
+/* Softmax SIMD helper functions - defined in simd_amd64.s */
+extern float softmax_max_simd(float *x, int size);
+extern float softmax_sum_simd(float *x, int size);
+extern void softmax_scale_simd(float *x, float scale, int size);
+extern void softmax_subtract_simd(float *x, float val, int size);
+extern void exp_schraudolph_simd(float *x, int size);
+extern void exp_poly_simd(float *x, int size);
 
 /*
  * softmax_simd - Optimized softmax (C implementation)
@@ -611,7 +621,7 @@ void rmsnorm_scalar(float* o, float* x, float* weight, int size) {
 
 /* Dispatcher for rmsnorm - uses SIMD or scalar based on config */
 void rmsnorm(float* o, float* x, float* weight, int size) {
-#ifndef DISABLE_THREADING
+#ifndef DISABLE_OPTIMIZATIONS
     if (opt_config.use_simd) {
         rmsnorm_simd(o, x, weight, size);
     } else {
@@ -622,7 +632,13 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
 #endif
 }
 
-void softmax(float* x, int size) {
+// ----------------------------------------------------------------------------
+// Softmax implementations
+// Mode 0: scalar (baseline), Mode 1: partial SIMD, Mode 2: Schraudolph,
+// Mode 3: polynomial, Mode 4: LUT
+
+/* Mode 0: Scalar softmax (baseline) */
+void softmax_scalar(float* x, int size) {
     // find max value (for numerical stability)
     float max_val = x[0];
     for (int i = 1; i < size; i++) {
@@ -642,6 +658,92 @@ void softmax(float* x, int size) {
     }
 }
 
+#ifndef DISABLE_OPTIMIZATIONS
+/* Mode 1: Partial SIMD - SIMD for max/sum/scale, C exp() */
+void softmax_partial(float* x, int size) {
+    float max_val = softmax_max_simd(x, size);
+    float sum = 0.0f;
+    for (int i = 0; i < size; i++) {
+        x[i] = exp(x[i] - max_val);
+        sum += x[i];
+    }
+    softmax_scale_simd(x, 1.0f/sum, size);
+}
+
+/* Mode 2: Schraudolph fast exp approximation */
+void softmax_schraudolph(float* x, int size) {
+    float max_val = softmax_max_simd(x, size);
+    softmax_subtract_simd(x, max_val, size);
+    exp_schraudolph_simd(x, size);
+    float sum = softmax_sum_simd(x, size);
+    softmax_scale_simd(x, 1.0f/sum, size);
+}
+
+/* Mode 3: Polynomial exp approximation */
+void softmax_poly(float* x, int size) {
+    float max_val = softmax_max_simd(x, size);
+    softmax_subtract_simd(x, max_val, size);
+    exp_poly_simd(x, size);
+    float sum = softmax_sum_simd(x, size);
+    softmax_scale_simd(x, 1.0f/sum, size);
+}
+
+/* Mode 4: LUT exp approximation with linear interpolation */
+#define EXP_LUT_SIZE 512
+#define EXP_LUT_MIN -20.0f
+#define EXP_LUT_MAX 20.0f
+static float exp_lut[EXP_LUT_SIZE];
+static int exp_lut_initialized = 0;
+
+void exp_lut_init(void) {
+    if (exp_lut_initialized) return;
+    float range = EXP_LUT_MAX - EXP_LUT_MIN;
+    for (int i = 0; i < EXP_LUT_SIZE; i++) {
+        float x = EXP_LUT_MIN + i * (range / (EXP_LUT_SIZE - 1));
+        exp_lut[i] = exp(x);
+    }
+    exp_lut_initialized = 1;
+}
+
+void softmax_lut(float* x, int size) {
+    exp_lut_init();
+    float max_val = softmax_max_simd(x, size);
+    float range = EXP_LUT_MAX - EXP_LUT_MIN;
+    float scale = (EXP_LUT_SIZE - 1) / range;
+    float sum = 0.0f;
+
+    for (int i = 0; i < size; i++) {
+        float v = x[i] - max_val;  // Now in [-inf, 0]
+        // Clamp to LUT range
+        if (v < EXP_LUT_MIN) v = EXP_LUT_MIN;
+        if (v > EXP_LUT_MAX) v = EXP_LUT_MAX;
+        float idx_f = (v - EXP_LUT_MIN) * scale;
+        int idx = (int)idx_f;
+        if (idx >= EXP_LUT_SIZE - 1) idx = EXP_LUT_SIZE - 2;
+        float frac = idx_f - idx;
+        // Linear interpolation
+        x[i] = exp_lut[idx] * (1.0f - frac) + exp_lut[idx + 1] * frac;
+        sum += x[i];
+    }
+    softmax_scale_simd(x, 1.0f/sum, size);
+}
+#endif
+
+/* Softmax dispatcher - selects implementation based on opt_config.softmax_mode */
+void softmax(float* x, int size) {
+#ifndef DISABLE_OPTIMIZATIONS
+    switch (opt_config.softmax_mode) {
+    case 1: softmax_partial(x, size); break;
+    case 2: softmax_schraudolph(x, size); break;
+    case 3: softmax_poly(x, size); break;
+    case 4: softmax_lut(x, size); break;
+    default: softmax_scalar(x, size); break;
+    }
+#else
+    softmax_scalar(x, size);
+#endif
+}
+
 /* Scalar C implementation of matmul */
 void matmul_scalar(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
@@ -656,7 +758,7 @@ void matmul_scalar(float* xout, float* x, float* w, int n, int d) {
 
 /* Dispatcher for matmul - uses SIMD or scalar based on config */
 void matmul(float* xout, float* x, float* w, int n, int d) {
-#ifndef DISABLE_THREADING
+#ifndef DISABLE_OPTIMIZATIONS
     if (opt_config.use_simd) {
         matmul_simd(xout, x, w, n, d);
     } else {

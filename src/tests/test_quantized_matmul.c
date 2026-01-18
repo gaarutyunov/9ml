@@ -1,5 +1,5 @@
 /* Test quantized matmul */
-#define DISABLE_THREADING
+#define DISABLE_OPTIMIZATIONS
 #include "modelq.c"
 
 void

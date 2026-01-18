@@ -1,5 +1,5 @@
 /* Test matmul function */
-#define DISABLE_THREADING
+#define DISABLE_OPTIMIZATIONS
 #include "model.c"
 
 void
