@@ -5,10 +5,22 @@ TARG=run runq export llmfs
 # SIMD assembly files for amd64
 SIMD_ASM=simd_amd64.$O simdq_amd64.$O
 
-all:V: $TARG
+# Architecture plugin library
+ARCH_LIB=arch/arch.a$O
 
-# run and runq need SIMD assembly linked
-run: run.$O $SIMD_ASM
+# New multi-model library directories
+SUBDIRS=core arch
+
+all:V: libs $TARG
+
+# Build libraries in subdirectories
+libs:V:
+	for(d in $SUBDIRS) @{
+		cd $d && mk
+	}
+
+# run and runq need SIMD assembly and arch plugins linked
+run: run.$O $SIMD_ASM $ARCH_LIB
 	$LD -o $target $prereq
 
 runq: runq.$O $SIMD_ASM
@@ -17,8 +29,8 @@ runq: runq.$O $SIMD_ASM
 export: export.$O
 	$LD -o $target $prereq
 
-# llmfs requires lib9p and libthread
-llmfs: llmfs.$O $SIMD_ASM
+# llmfs requires lib9p, libthread, and arch plugins
+llmfs: llmfs.$O $SIMD_ASM $ARCH_LIB
 	$LD -o $target $prereq
 
 # C source compilation
@@ -34,3 +46,6 @@ simdq_amd64.$O: simdq_amd64.s
 
 clean:V:
 	rm -f *.$O $TARG
+	for(d in $SUBDIRS) @{
+		cd $d && mk clean
+	}

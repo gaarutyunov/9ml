@@ -12,6 +12,9 @@
 #include <thread.h>
 #endif
 
+/* Include arch plugin types and registry */
+#include "arch/arch.h"
+
 // ----------------------------------------------------------------------------
 // Optimization configuration
 
@@ -55,7 +58,8 @@ struct ThreadPool {
 };
 #endif
 
-static ThreadPool *global_pool = nil;
+/* Global thread pool - accessible to arch plugins */
+ThreadPool *global_pool = nil;
 
 /* Detect number of CPUs by reading /dev/sysstat */
 int
@@ -381,63 +385,9 @@ void softmax_simd(float *x, int size) {
 
 // ----------------------------------------------------------------------------
 // Transformer model
-
-typedef struct {
-    int dim; // transformer dimension
-    int hidden_dim; // for ffn layers
-    int n_layers; // number of layers
-    int n_heads; // number of query heads
-    int n_kv_heads; // number of key/value heads (can be < query heads because of multiquery)
-    int vocab_size; // vocabulary size, usually 256 (byte-level)
-    int seq_len; // max sequence length
-} Config;
-
-typedef struct {
-    // token embedding table
-    float* token_embedding_table;    // (vocab_size, dim)
-    // weights for rmsnorms
-    float* rms_att_weight; // (layer, dim) rmsnorm weights
-    float* rms_ffn_weight; // (layer, dim)
-    // weights for matmuls. note dim == n_heads * head_size
-    float* wq; // (layer, dim, n_heads * head_size)
-    float* wk; // (layer, dim, n_kv_heads * head_size)
-    float* wv; // (layer, dim, n_kv_heads * head_size)
-    float* wo; // (layer, n_heads * head_size, dim)
-    // weights for ffn
-    float* w1; // (layer, hidden_dim, dim)
-    float* w2; // (layer, dim, hidden_dim)
-    float* w3; // (layer, hidden_dim, dim)
-    // final rmsnorm
-    float* rms_final_weight; // (dim,)
-    // (optional) classifier weights for the logits, on the last layer
-    float* wcls;
-} TransformerWeights;
-
-typedef struct {
-    // current wave of activations
-    float *x; // activation at current time stamp (dim,)
-    float *xb; // same, but inside a residual branch (dim,)
-    float *xb2; // an additional buffer just for convenience (dim,)
-    float *hb; // buffer for hidden dimension in the ffn (hidden_dim,)
-    float *hb2; // buffer for hidden dimension in the ffn (hidden_dim,)
-    float *q; // query (dim,)
-    float *k; // key (dim,)
-    float *v; // value (dim,)
-    float *att; // buffer for scores/attention values (n_heads, seq_len)
-    float *logits; // output logits
-    // kv cache
-    float* key_cache;   // (layer, seq_len, dim)
-    float* value_cache; // (layer, seq_len, dim)
-} RunState;
-
-typedef struct {
-    Config config; // the hyperparameters of the architecture (the blueprint)
-    TransformerWeights weights; // the weights of the model
-    RunState state; // buffers for the "wave" of activations in the forward pass
-    // file-based loading (Plan 9: no mmap)
-    float* data; // loaded data pointer
-    vlong file_size; // size of the checkpoint file in bytes
-} Transformer;
+//
+// Types (Config, TransformerWeights, RunState, Transformer) are defined in
+// arch/arch.h. This ensures binary compatibility with the arch plugins.
 
 void malloc_run_state(RunState* s, Config* p) {
     // we calloc instead of malloc to keep valgrind happy
@@ -504,15 +454,40 @@ void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared
     w->wcls = shared_weights ? w->token_embedding_table : ptr;
 }
 
-// Config is stored as 7 ints (28 bytes) in the file, but Plan 9 may pad the struct
-#define CONFIG_FILE_SIZE (7 * sizeof(int))
+// ----------------------------------------------------------------------------
+// 9ml Model Format
+//
+// Legacy format (llama2.c compatible): 7 ints (28 bytes)
+//   dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len
+//
+// Extended format (9ml v1): magic + explicit architecture info
+//   magic (4 bytes): 0x394D4C01 ("9ML\x01")
+//   header_size (4 bytes): total header size (60 for v1)
+//   arch_id (4 bytes): 1=llama2, 2=llama3, 3=mistral
+//   rope_theta (4 bytes): float, e.g., 10000.0 or 500000.0
+//   ffn_type (4 bytes): 0=SwiGLU, 1=GeGLU, 2=GELU
+//   flags (4 bytes): bit0=attn_bias, bit1=mlp_bias
+//   sliding_window (4 bytes): 0=full attention, >0=window size
+//   reserved (4 bytes): for future use
+//   dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len (28 bytes)
+//
+// Detection: first 4 bytes. If == 0x394D4C01, it's extended format.
+// Otherwise it's legacy (first int is dim, typically 64-8192).
+
+#define FORMAT_MAGIC_9ML_V1   0x394D4C01  /* "9ML\x01" */
+#define LEGACY_CONFIG_SIZE    (7 * sizeof(int))   /* 28 bytes */
+#define EXTENDED_HEADER_SIZE  (15 * sizeof(int))  /* 60 bytes */
+
+/* Architecture IDs are defined in arch/arch.h */
 
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
                      float** data, vlong* file_size) {
     int fd;
     Dir *d;
     vlong n;
-    int config_buf[7];
+    uint magic;
+    int header_size;
+    int shared_weights;
 
     // open file and get size
     fd = open(checkpoint, OREAD);
@@ -529,27 +504,88 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
     *file_size = d->length;
     free(d);
 
-    // read the config header (7 ints = 28 bytes, not sizeof(Config) which may be padded)
-    n = read(fd, config_buf, CONFIG_FILE_SIZE);
-    if (n != CONFIG_FILE_SIZE) {
-        fprint(2, "failed to read config\n");
+    // Read first 4 bytes to detect format
+    n = read(fd, &magic, sizeof(uint));
+    if (n != sizeof(uint)) {
+        fprint(2, "failed to read header\n");
         close(fd);
         exits("read");
     }
-    config->dim = config_buf[0];
-    config->hidden_dim = config_buf[1];
-    config->n_layers = config_buf[2];
-    config->n_heads = config_buf[3];
-    config->n_kv_heads = config_buf[4];
-    config->vocab_size = config_buf[5];
-    config->seq_len = config_buf[6];
 
-    // negative vocab size is hacky way of signaling unshared weights
-    int shared_weights = config->vocab_size > 0 ? 1 : 0;
-    if (config->vocab_size < 0) config->vocab_size = -config->vocab_size;
+    if (magic == FORMAT_MAGIC_9ML_V1) {
+        // Extended 9ml format - read full extended header
+        int ext_buf[14];  /* header_size + 13 more fields */
+        n = read(fd, ext_buf, 14 * sizeof(int));
+        if (n != 14 * sizeof(int)) {
+            fprint(2, "failed to read extended header\n");
+            close(fd);
+            exits("read");
+        }
 
-    // allocate memory for weights and read them
-    vlong weights_size = *file_size - CONFIG_FILE_SIZE;
+        header_size = ext_buf[0];
+        config->arch_id = ext_buf[1];
+
+        // rope_theta is stored as float bits in an int slot
+        union { int i; float f; } theta_conv;
+        theta_conv.i = ext_buf[2];
+        config->rope_theta = theta_conv.f;
+
+        // Skip ffn_type (ext_buf[3]), flags (ext_buf[4]),
+        // sliding_window (ext_buf[5]), reserved (ext_buf[6])
+
+        config->dim = ext_buf[7];
+        config->hidden_dim = ext_buf[8];
+        config->n_layers = ext_buf[9];
+        config->n_heads = ext_buf[10];
+        config->n_kv_heads = ext_buf[11];
+        config->vocab_size = ext_buf[12];
+        config->seq_len = ext_buf[13];
+
+        // Handle shared weights flag
+        shared_weights = config->vocab_size > 0 ? 1 : 0;
+        if (config->vocab_size < 0) config->vocab_size = -config->vocab_size;
+
+        // Skip any extra header bytes if header_size > EXTENDED_HEADER_SIZE
+        if (header_size > EXTENDED_HEADER_SIZE) {
+            seek(fd, header_size - EXTENDED_HEADER_SIZE, 1);
+        }
+
+    } else {
+        // Legacy llama2.c format - magic was actually dim
+        int config_buf[6];  /* remaining 6 fields */
+        n = read(fd, config_buf, 6 * sizeof(int));
+        if (n != 6 * sizeof(int)) {
+            fprint(2, "failed to read legacy config\n");
+            close(fd);
+            exits("read");
+        }
+
+        config->dim = (int)magic;  /* first int was dim */
+        config->hidden_dim = config_buf[0];
+        config->n_layers = config_buf[1];
+        config->n_heads = config_buf[2];
+        config->n_kv_heads = config_buf[3];
+        config->vocab_size = config_buf[4];
+        config->seq_len = config_buf[5];
+
+        // negative vocab size signals unshared weights
+        shared_weights = config->vocab_size > 0 ? 1 : 0;
+        if (config->vocab_size < 0) config->vocab_size = -config->vocab_size;
+
+        // Auto-detect architecture from vocab size (heuristic for legacy files)
+        if (config->vocab_size >= 100000) {
+            config->rope_theta = 500000.0f;
+            config->arch_id = ARCH_LLAMA3;
+        } else {
+            config->rope_theta = 10000.0f;
+            config->arch_id = ARCH_LLAMA2;
+        }
+
+        header_size = LEGACY_CONFIG_SIZE;
+    }
+
+    // Allocate memory for weights
+    vlong weights_size = *file_size - header_size;
     *data = malloc(weights_size);
     if (*data == nil) {
         fprint(2, "malloc failed for weights\n");
@@ -557,7 +593,7 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
         exits("malloc");
     }
 
-    // read weights in chunks (Plan 9 read may have size limits)
+    // Read weights in chunks (Plan 9 read may have size limits)
     char *buf = (char*)*data;
     vlong remaining = weights_size;
     while (remaining > 0) {
@@ -577,10 +613,17 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
 }
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
+    // Initialize architecture subsystem once
+    arch_init();
+
     // read in the Config and the Weights from the checkpoint
     read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->data, &t->file_size);
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
+
+    // Bind architecture plugin based on detected arch_id
+    t->arch = arch_find_by_id(t->config.arch_id);
+    // Note: t->arch may be nil if no plugin matches - forward() handles this
 }
 
 void free_transformer(Transformer* t) {
@@ -826,6 +869,12 @@ parallel_attention(RunState *s, Config *p, int pos, int loff, int kv_dim, int kv
 
 float* forward(Transformer* transformer, int token, int pos) {
 
+    // Dispatch to architecture plugin if available
+    if (transformer->arch != nil && transformer->arch->forward != nil) {
+        return transformer->arch->forward(transformer, token, pos);
+    }
+
+    // Fallback: built-in forward implementation (LLaMA 2 compatible)
     // a few convenience variables
     Config* p = &transformer->config;
     TransformerWeights* w = &transformer->weights;
@@ -858,9 +907,10 @@ float* forward(Transformer* transformer, int token, int pos) {
         matmul(s->v, s->xb, w->wv + l*dim*kv_dim, dim, kv_dim);
 
         // RoPE relative positional encoding: complex-valued rotate q and k in each head
+        // Uses rope_theta from config (10000 for LLaMA2, 500000 for LLaMA3)
         for (int i = 0; i < dim; i+=2) {
             int head_dim = i % head_size;
-            float freq = 1.0f / pow(10000.0f, head_dim / (float)head_size);
+            float freq = 1.0f / pow(p->rope_theta, head_dim / (float)head_size);
             float val = pos * freq;
             float fcr = cos(val);
             float fci = sin(val);

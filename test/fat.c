@@ -102,3 +102,29 @@ int fat_list(const char *disk_path) {
     snprintf(cmd, sizeof(cmd), "mdir -i %s ::", disk_path);
     return system(cmd);
 }
+
+int fat_mkdir(const char *disk_path, const char *dirname) {
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "mmd -i %s ::%s 2>/dev/null", disk_path, dirname);
+    int ret = system(cmd);
+    /* mmd returns error if dir exists, which is ok */
+    (void)ret;
+    return 0;
+}
+
+int fat_copy_to_dir(const char *disk_path, const char *src_path, const char *dest_dir, const char *dest_name) {
+    char cmd[1024];
+    char dest[512];
+    if (dest_dir && dest_dir[0]) {
+        snprintf(dest, sizeof(dest), "%s/%s", dest_dir, dest_name);
+    } else {
+        snprintf(dest, sizeof(dest), "%s", dest_name);
+    }
+    snprintf(cmd, sizeof(cmd), "mcopy -i %s %s ::%s", disk_path, src_path, dest);
+    int ret = system(cmd);
+    if (ret != 0) {
+        fprintf(stderr, "fat_copy_to_dir: mcopy failed for %s -> %s\n", src_path, dest);
+        return -1;
+    }
+    return 0;
+}

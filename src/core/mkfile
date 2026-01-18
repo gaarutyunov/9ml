@@ -1,0 +1,22 @@
+</$objtype/mkfile
+
+LIB=core.a$O
+
+OFILES=\
+	kernels.$O\
+	quantize.$O\
+
+HFILES=\
+	kernels.h\
+	quantize.h\
+
+all:V: $LIB
+
+$LIB: $OFILES
+	ar vu $LIB $OFILES
+
+%.$O: %.c $HFILES
+	$CC $CFLAGS $stem.c
+
+clean:V:
+	rm -f *.$O $LIB

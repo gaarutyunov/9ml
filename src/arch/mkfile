@@ -1,0 +1,23 @@
+</$objtype/mkfile
+
+LIB=arch.a$O
+
+OFILES=\
+	arch.$O\
+	llama2.$O\
+	llama3.$O\
+	mistral.$O\
+
+HFILES=\
+	arch.h\
+
+all:V: $LIB
+
+$LIB: $OFILES
+	ar vu $LIB $OFILES
+
+%.$O: %.c $HFILES
+	$CC $CFLAGS $stem.c
+
+clean:V:
+	rm -f *.$O $LIB

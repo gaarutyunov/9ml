@@ -1,0 +1,384 @@
+/*
+ * arch/llama2.c - LLaMA 2 architecture plugin for 9ml
+ *
+ * LLaMA 2 (Meta, 2023) characteristics:
+ *   - RoPE with theta=10000
+ *   - SwiGLU activation (SiLU(x) * W3(x))
+ *   - No biases in attention or MLP
+ *   - Grouped-Query Attention (GQA) support
+ *   - RMSNorm (not LayerNorm)
+ */
+
+#include <u.h>
+#include <libc.h>
+
+#ifndef DISABLE_THREADING
+#include <thread.h>
+#endif
+
+#include "arch.h"
+#include "../core/kernels.h"
+
+/* Magic number for legacy llama2.c format: first int negative means vocab_size */
+#define LLAMA2_LEGACY_MAGIC 0
+
+/* ----------------------------------------------------------------------------
+ * Thread pool access (defined in model.c)
+ * ---------------------------------------------------------------------------- */
+
+#ifndef DISABLE_THREADING
+typedef struct ThreadPool ThreadPool;
+extern ThreadPool *global_pool;
+extern void pool_submit(ThreadPool *p, void (*fn)(void*), void *arg);
+extern void pool_wait(ThreadPool *p, int njobs);
+#endif
+
+/* ----------------------------------------------------------------------------
+ * Attention head worker context
+ * ---------------------------------------------------------------------------- */
+
+typedef struct {
+    int h;
+    int head_size;
+    int pos;
+    int seq_len;
+    int kv_dim;
+    int kv_mul;
+    int loff;
+    float *q;
+    float *att;
+    float *xb;
+    float *key_cache;
+    float *value_cache;
+} HeadContext;
+
+static void
+attention_head_worker(void *arg)
+{
+    HeadContext *ctx = arg;
+    int h = ctx->h;
+    int head_size = ctx->head_size;
+    int pos = ctx->pos;
+    int kv_dim = ctx->kv_dim;
+    int kv_mul = ctx->kv_mul;
+    int loff = ctx->loff;
+    float *q_ptr, *att_ptr, *xb_ptr, *k, *v;
+    int t, i;
+    float score, a;
+
+    q_ptr = ctx->q + h * head_size;
+    att_ptr = ctx->att + h * ctx->seq_len;
+    xb_ptr = ctx->xb + h * head_size;
+
+    /* Compute attention scores */
+    for (t = 0; t <= pos; t++) {
+        k = ctx->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+        score = 0.0f;
+        for (i = 0; i < head_size; i++) {
+            score += q_ptr[i] * k[i];
+        }
+        att_ptr[t] = score / sqrt((float)head_size);
+    }
+
+    /* Softmax */
+    softmax(att_ptr, pos + 1);
+
+    /* Weighted sum of values */
+    memset(xb_ptr, 0, head_size * sizeof(float));
+    for (t = 0; t <= pos; t++) {
+        v = ctx->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+        a = att_ptr[t];
+        for (i = 0; i < head_size; i++) {
+            xb_ptr[i] += a * v[i];
+        }
+    }
+}
+
+/* ----------------------------------------------------------------------------
+ * Parallel multihead attention
+ * ---------------------------------------------------------------------------- */
+
+static void
+parallel_attention(RunState *s, ModelConfig *p, int pos, int loff,
+                   int kv_dim, int kv_mul, int head_size)
+{
+    int h;
+    HeadContext *contexts;
+
+#ifndef DISABLE_THREADING
+    /* If single-threaded or no pool, use sequential */
+    if (opt_config.nthreads <= 1 || global_pool == nil) {
+#endif
+        for (h = 0; h < p->n_heads; h++) {
+            float *q_ptr = s->q + h * head_size;
+            float *att_ptr = s->att + h * p->seq_len;
+            float *xb_ptr = s->xb + h * head_size;
+            int t, i;
+            float score, a;
+            float *k, *v;
+
+            for (t = 0; t <= pos; t++) {
+                k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                score = 0.0f;
+                for (i = 0; i < head_size; i++) {
+                    score += q_ptr[i] * k[i];
+                }
+                att_ptr[t] = score / sqrt((float)head_size);
+            }
+
+            softmax(att_ptr, pos + 1);
+
+            memset(xb_ptr, 0, head_size * sizeof(float));
+            for (t = 0; t <= pos; t++) {
+                v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                a = att_ptr[t];
+                for (i = 0; i < head_size; i++) {
+                    xb_ptr[i] += a * v[i];
+                }
+            }
+        }
+        return;
+#ifndef DISABLE_THREADING
+    }
+
+    /* Allocate contexts and submit to thread pool */
+    contexts = malloc(p->n_heads * sizeof(HeadContext));
+    if (contexts == nil) {
+        /* Fallback to sequential on allocation failure */
+        for (h = 0; h < p->n_heads; h++) {
+            float *q_ptr = s->q + h * head_size;
+            float *att_ptr = s->att + h * p->seq_len;
+            float *xb_ptr = s->xb + h * head_size;
+            int t, i;
+            float score, a;
+            float *k, *v;
+
+            for (t = 0; t <= pos; t++) {
+                k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                score = 0.0f;
+                for (i = 0; i < head_size; i++) {
+                    score += q_ptr[i] * k[i];
+                }
+                att_ptr[t] = score / sqrt((float)head_size);
+            }
+
+            softmax(att_ptr, pos + 1);
+
+            memset(xb_ptr, 0, head_size * sizeof(float));
+            for (t = 0; t <= pos; t++) {
+                v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                a = att_ptr[t];
+                for (i = 0; i < head_size; i++) {
+                    xb_ptr[i] += a * v[i];
+                }
+            }
+        }
+        return;
+    }
+
+    for (h = 0; h < p->n_heads; h++) {
+        contexts[h].h = h;
+        contexts[h].head_size = head_size;
+        contexts[h].pos = pos;
+        contexts[h].seq_len = p->seq_len;
+        contexts[h].kv_dim = kv_dim;
+        contexts[h].kv_mul = kv_mul;
+        contexts[h].loff = loff;
+        contexts[h].q = s->q;
+        contexts[h].att = s->att;
+        contexts[h].xb = s->xb;
+        contexts[h].key_cache = s->key_cache;
+        contexts[h].value_cache = s->value_cache;
+
+        pool_submit(global_pool, attention_head_worker, &contexts[h]);
+    }
+
+    pool_wait(global_pool, p->n_heads);
+    free(contexts);
+#endif
+}
+
+/* ----------------------------------------------------------------------------
+ * LLaMA 2 Forward Pass
+ * ---------------------------------------------------------------------------- */
+
+static float *
+llama2_forward(ModelInstance *m, int token, int pos)
+{
+    ModelConfig *p = &m->config;
+    TransformerWeights *w = &m->weights;
+    RunState *s = &m->state;
+    float *x = s->x;
+    int dim = p->dim;
+    int kv_dim = (p->dim * p->n_kv_heads) / p->n_heads;
+    int kv_mul = p->n_heads / p->n_kv_heads;
+    int hidden_dim = p->hidden_dim;
+    int head_size = dim / p->n_heads;
+    uvlong l;
+    int loff, i;
+    float *content_row;
+
+    /* Copy the token embedding into x */
+    content_row = w->token_embedding_table + token * dim;
+    memcpy(x, content_row, dim * sizeof(float));
+
+    /* Forward all the layers */
+    for (l = 0; l < p->n_layers; l++) {
+        /* Attention rmsnorm */
+        rmsnorm(s->xb, x, w->rms_att_weight + l * dim, dim);
+
+        /* Key and value point to the kv cache */
+        loff = l * p->seq_len * kv_dim;
+        s->k = s->key_cache + loff + pos * kv_dim;
+        s->v = s->value_cache + loff + pos * kv_dim;
+
+        /* QKV matmuls for this position */
+        matmul(s->q, s->xb, w->wq + l * dim * dim, dim, dim);
+        matmul(s->k, s->xb, w->wk + l * dim * kv_dim, dim, kv_dim);
+        matmul(s->v, s->xb, w->wv + l * dim * kv_dim, dim, kv_dim);
+
+        /* RoPE relative positional encoding */
+        rope_apply_standard(s->q, s->k, dim, kv_dim, pos, head_size, p);
+
+        /* Multihead attention */
+        parallel_attention(s, p, pos, loff, kv_dim, kv_mul, head_size);
+
+        /* Final matmul to get the output of the attention */
+        matmul(s->xb2, s->xb, w->wo + l * dim * dim, dim, dim);
+
+        /* Residual connection back into x */
+        for (i = 0; i < dim; i++) {
+            x[i] += s->xb2[i];
+        }
+
+        /* FFN rmsnorm */
+        rmsnorm(s->xb, x, w->rms_ffn_weight + l * dim, dim);
+
+        /* FFN: self.w2(F.silu(self.w1(x)) * self.w3(x)) */
+        matmul(s->hb, s->xb, w->w1 + l * dim * hidden_dim, dim, hidden_dim);
+        matmul(s->hb2, s->xb, w->w3 + l * dim * hidden_dim, dim, hidden_dim);
+
+        /* SwiGLU non-linearity */
+        for (i = 0; i < hidden_dim; i++) {
+            float val = s->hb[i];
+            /* silu(x) = x * sigmoid(x) */
+            val *= (1.0f / (1.0f + exp(-val)));
+            /* elementwise multiply with w3(x) */
+            val *= s->hb2[i];
+            s->hb[i] = val;
+        }
+
+        /* Final matmul to get the output of the ffn */
+        matmul(s->xb, s->hb, w->w2 + l * dim * hidden_dim, hidden_dim, dim);
+
+        /* Residual connection */
+        for (i = 0; i < dim; i++) {
+            x[i] += s->xb[i];
+        }
+    }
+
+    /* Final rmsnorm */
+    rmsnorm(x, x, w->rms_final_weight, dim);
+
+    /* Classifier into logits */
+    matmul(s->logits, x, w->wcls, p->dim, p->vocab_size);
+
+    return s->logits;
+}
+
+/* ----------------------------------------------------------------------------
+ * LLaMA 2 Architecture Detection
+ *
+ * Legacy llama2.c format:
+ *   - 7 ints (28 bytes) header: dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len
+ *   - Negative vocab_size indicates separate classifier weights
+ *   - No magic number (first int is dim, typically 288-4096)
+ * ---------------------------------------------------------------------------- */
+
+static int
+llama2_detect(void *data, vlong size, ModelConfig *cfg)
+{
+    int *header;
+    int dim, hidden_dim, n_layers, n_heads;
+
+    USED(size);
+
+    if (size < 28) {
+        return 0;  /* Too small to be a model */
+    }
+
+    header = (int *)data;
+    dim = header[0];
+    hidden_dim = header[1];
+    n_layers = header[2];
+    n_heads = header[3];
+
+    /* Sanity checks for llama2.c format */
+    if (dim < 64 || dim > 8192) return 0;
+    if (hidden_dim < 64 || hidden_dim > 32768) return 0;
+    if (n_layers < 1 || n_layers > 128) return 0;
+    if (n_heads < 1 || n_heads > 128) return 0;
+
+    /* Set LLaMA 2 defaults */
+    cfg->rope_theta = 10000.0f;
+    cfg->arch_id = ARCH_LLAMA2;
+
+    return 1;
+}
+
+/* ----------------------------------------------------------------------------
+ * Memory Estimation
+ * ---------------------------------------------------------------------------- */
+
+static uvlong
+llama2_estimate_memory(ModelConfig *cfg, int quant_type)
+{
+    uvlong params;
+    uvlong head_size;
+    uvlong kv_dim;
+    int bytes_per_param;
+
+    USED(quant_type);  /* TODO: support different quant types */
+
+    head_size = cfg->dim / cfg->n_heads;
+    kv_dim = cfg->n_kv_heads * head_size;
+
+    /* Count parameters */
+    params = 0;
+    params += cfg->vocab_size * cfg->dim;           /* token embeddings */
+    params += cfg->n_layers * cfg->dim;             /* rms_att_weight */
+    params += cfg->n_layers * cfg->dim;             /* rms_ffn_weight */
+    params += cfg->n_layers * cfg->dim * cfg->dim;  /* wq */
+    params += cfg->n_layers * cfg->dim * kv_dim;    /* wk */
+    params += cfg->n_layers * cfg->dim * kv_dim;    /* wv */
+    params += cfg->n_layers * cfg->dim * cfg->dim;  /* wo */
+    params += cfg->n_layers * cfg->dim * cfg->hidden_dim;  /* w1 */
+    params += cfg->n_layers * cfg->hidden_dim * cfg->dim;  /* w2 */
+    params += cfg->n_layers * cfg->dim * cfg->hidden_dim;  /* w3 */
+    params += cfg->dim;                             /* rms_final_weight */
+    params += cfg->dim * cfg->vocab_size;           /* wcls (may be shared) */
+
+    bytes_per_param = sizeof(float);  /* FP32 */
+
+    return params * bytes_per_param;
+}
+
+/* ----------------------------------------------------------------------------
+ * Architecture Registration
+ * ---------------------------------------------------------------------------- */
+
+static ModelArch llama2_arch = {
+    .name = "llama2",
+    .arch_id = ARCH_LLAMA2,
+    .forward = llama2_forward,
+    .apply_rope = rope_apply_standard,
+    .estimate_memory = llama2_estimate_memory,
+    .detect = llama2_detect,
+};
+
+/* Registration function - call at startup */
+void
+llama2_register(void)
+{
+    arch_register(&llama2_arch);
+}

@@ -17,4 +17,10 @@ int fat_delete(const char *disk_path, const char *filename);
 /* List files on disk (for debugging) */
 int fat_list(const char *disk_path);
 
+/* Create a directory on the FAT disk */
+int fat_mkdir(const char *disk_path, const char *dirname);
+
+/* Copy a file to a directory on the FAT disk */
+int fat_copy_to_dir(const char *disk_path, const char *src_path, const char *dest_dir, const char *dest_name);
+
 #endif /* FAT_H */

@@ -32,7 +32,7 @@
 static void exits(const char *s) { exit(s ? 1 : 0); }
 #endif
 
-/* Model config (28 bytes in file) */
+/* Model config */
 typedef struct {
     int dim;
     int hidden_dim;
@@ -41,7 +41,30 @@ typedef struct {
     int n_kv_heads;
     int vocab_size;
     int seq_len;
+    /* Extended fields for multi-architecture support */
+    float rope_theta;
+    int arch_id;
 } Config;
+
+/* 9ml format constants */
+#define FORMAT_MAGIC_9ML_V1   0x394D4C01  /* "9ML\x01" */
+#define LEGACY_CONFIG_SIZE    28          /* 7 ints */
+#define EXTENDED_HEADER_SIZE  60          /* 15 ints */
+
+/* Architecture IDs */
+#define ARCH_UNKNOWN  0
+#define ARCH_LLAMA2   1
+#define ARCH_LLAMA3   2
+#define ARCH_MISTRAL  3
+
+static const char *arch_name(int arch_id) {
+    switch (arch_id) {
+        case ARCH_LLAMA2: return "LLaMA 2";
+        case ARCH_LLAMA3: return "LLaMA 3";
+        case ARCH_MISTRAL: return "Mistral";
+        default: return "Unknown";
+    }
+}
 
 /* Read entire file into memory */
 static char *read_file(const char *path, vlong *size_out) {
@@ -147,13 +170,15 @@ static int cmd_info(const char *path) {
     char *data = read_file(path, &size);
     if (!data) return 1;
 
-    /* Check for quantized format (magic number) */
+    /* Check for format magic numbers */
     unsigned int magic = *(unsigned int*)data;
     int quantized = (magic == 0x616b3432);  /* "ak42" */
+    int extended = (magic == FORMAT_MAGIC_9ML_V1);  /* "9ML\x01" */
 
     Config c;
     float *weights;
     int group_size = 0;
+    int header_size = LEGACY_CONFIG_SIZE;
 
     if (quantized) {
         /* Version 2 quantized format */
@@ -172,6 +197,8 @@ static int cmd_info(const char *path) {
         c.n_kv_heads = config_ptr[4];
         c.vocab_size = config_ptr[5];
         c.seq_len = config_ptr[6];
+        c.rope_theta = 10000.0f;  /* Default for quantized */
+        c.arch_id = ARCH_LLAMA2;
 
         uchar shared_classifier = *(uchar*)(data + 36);
         group_size = *(int*)(data + 37);
@@ -180,8 +207,36 @@ static int cmd_info(const char *path) {
         print("  Version: %d\n", version);
         print("  Shared classifier: %s\n", shared_classifier ? "yes" : "no");
         print("  Group size: %d\n", group_size);
+    } else if (extended) {
+        /* Extended 9ml format */
+        int *ext_buf = (int*)(data + 4);
+        header_size = ext_buf[0];
+        c.arch_id = ext_buf[1];
+
+        /* rope_theta is stored as float bits */
+        union { int i; float f; } theta_conv;
+        theta_conv.i = ext_buf[2];
+        c.rope_theta = theta_conv.f;
+
+        c.dim = ext_buf[7];
+        c.hidden_dim = ext_buf[8];
+        c.n_layers = ext_buf[9];
+        c.n_heads = ext_buf[10];
+        c.n_kv_heads = ext_buf[11];
+        c.vocab_size = ext_buf[12];
+        c.seq_len = ext_buf[13];
+
+        int shared_weights = c.vocab_size > 0 ? 1 : 0;
+        if (c.vocab_size < 0) c.vocab_size = -c.vocab_size;
+
+        weights = (float*)(data + header_size);
+
+        print("Extended 9ml Model (v1)\n");
+        print("  Architecture: %s (id=%d)\n", arch_name(c.arch_id), c.arch_id);
+        print("  RoPE theta: %.1f\n", c.rope_theta);
+        print("  Shared weights: %s\n", shared_weights ? "yes" : "no");
     } else {
-        /* FP32 format */
+        /* Legacy FP32 format */
         int *config_ptr = (int*)data;
         c.dim = config_ptr[0];
         c.hidden_dim = config_ptr[1];
@@ -194,9 +249,19 @@ static int cmd_info(const char *path) {
         int shared_weights = c.vocab_size > 0 ? 1 : 0;
         if (c.vocab_size < 0) c.vocab_size = -c.vocab_size;
 
+        /* Auto-detect architecture from vocab size */
+        if (c.vocab_size >= 100000) {
+            c.rope_theta = 500000.0f;
+            c.arch_id = ARCH_LLAMA3;
+        } else {
+            c.rope_theta = 10000.0f;
+            c.arch_id = ARCH_LLAMA2;
+        }
+
         weights = (float*)(data + 28);
 
-        print("FP32 Model\n");
+        print("Legacy FP32 Model (llama2.c format)\n");
+        print("  Detected arch: %s (rope_theta=%.1f)\n", arch_name(c.arch_id), c.rope_theta);
         print("  Shared weights: %s\n", shared_weights ? "yes" : "no");
     }
 
@@ -235,6 +300,100 @@ static int cmd_info(const char *path) {
 
     free(data);
     return 0;
+}
+
+/* Upgrade legacy format to extended 9ml format */
+static int cmd_upgrade(const char *in_path, const char *out_path, int arch_id, float rope_theta) {
+    vlong size;
+    char *data = read_file(in_path, &size);
+    if (!data) return 1;
+
+    /* Check that input is legacy format */
+    unsigned int magic = *(unsigned int*)data;
+    if (magic == FORMAT_MAGIC_9ML_V1) {
+        print("Input is already in extended format\n");
+        free(data);
+        return 0;
+    }
+    if (magic == 0x616b3432) {
+        fprint(STDERR, "Cannot upgrade quantized format (use FP32 model)\n");
+        free(data);
+        return 1;
+    }
+
+    /* Parse legacy header */
+    int *config_ptr = (int*)data;
+    int dim = config_ptr[0];
+    int hidden_dim = config_ptr[1];
+    int n_layers = config_ptr[2];
+    int n_heads = config_ptr[3];
+    int n_kv_heads = config_ptr[4];
+    int vocab_size = config_ptr[5];
+    int seq_len = config_ptr[6];
+
+    /* Auto-detect if not specified */
+    if (arch_id == 0) {
+        int abs_vocab = vocab_size < 0 ? -vocab_size : vocab_size;
+        if (abs_vocab >= 100000) {
+            arch_id = ARCH_LLAMA3;
+            rope_theta = 500000.0f;
+        } else {
+            arch_id = ARCH_LLAMA2;
+            rope_theta = 10000.0f;
+        }
+    }
+
+    print("Upgrading to extended 9ml format:\n");
+    print("  Architecture: %s (id=%d)\n", arch_name(arch_id), arch_id);
+    print("  RoPE theta: %.1f\n", rope_theta);
+
+    /* Calculate output size */
+    vlong weights_size = size - LEGACY_CONFIG_SIZE;
+    vlong out_size = EXTENDED_HEADER_SIZE + weights_size;
+
+    char *out = malloc(out_size);
+    if (!out) {
+        fprint(STDERR, "Out of memory\n");
+        free(data);
+        return 1;
+    }
+
+    /* Write extended header */
+    int *out_header = (int*)out;
+    out_header[0] = FORMAT_MAGIC_9ML_V1;
+    out_header[1] = EXTENDED_HEADER_SIZE;  /* header_size */
+    out_header[2] = arch_id;
+
+    /* Write rope_theta as float bits */
+    union { float f; int i; } theta_conv;
+    theta_conv.f = rope_theta;
+    out_header[3] = theta_conv.i;
+
+    out_header[4] = 0;   /* ffn_type = SwiGLU */
+    out_header[5] = 0;   /* flags */
+    out_header[6] = 0;   /* sliding_window */
+    out_header[7] = 0;   /* reserved */
+
+    out_header[8] = dim;
+    out_header[9] = hidden_dim;
+    out_header[10] = n_layers;
+    out_header[11] = n_heads;
+    out_header[12] = n_kv_heads;
+    out_header[13] = vocab_size;
+    out_header[14] = seq_len;
+
+    /* Copy weights */
+    memcpy(out + EXTENDED_HEADER_SIZE, data + LEGACY_CONFIG_SIZE, weights_size);
+
+    /* Write output */
+    int ret = write_file(out_path, out, out_size);
+    free(out);
+    free(data);
+
+    if (ret == 0) {
+        print("Done. Output size: %lld bytes\n", (long long)out_size);
+    }
+    return ret;
 }
 
 /* Quantize a float array to int8 with scaling */
@@ -468,8 +627,13 @@ static int cmd_quantize(const char *in_path, const char *out_path) {
 static void usage(void) {
     fprint(STDERR, "Usage: export <command> [args]\n");
     fprint(STDERR, "\nCommands:\n");
-    fprint(STDERR, "  info <model.bin>              Show model info\n");
-    fprint(STDERR, "  quantize <in.bin> <out.bin>   Quantize FP32 model to Q8_0\n");
+    fprint(STDERR, "  info <model.bin>                      Show model info\n");
+    fprint(STDERR, "  upgrade <in.bin> <out.bin> [arch]     Convert to extended 9ml format\n");
+    fprint(STDERR, "  quantize <in.bin> <out.bin>           Quantize FP32 model to Q8_0\n");
+    fprint(STDERR, "\nArchitecture options for upgrade:\n");
+    fprint(STDERR, "  llama2   LLaMA 2 (rope_theta=10000, default for vocab<100K)\n");
+    fprint(STDERR, "  llama3   LLaMA 3 (rope_theta=500000, default for vocab>=100K)\n");
+    fprint(STDERR, "  mistral  Mistral (rope_theta=10000)\n");
     exits("usage");
 }
 
@@ -485,6 +649,28 @@ int main(int argc, char *argv[])
     if (strcmp(argv[1], "info") == 0) {
         if (argc < 3) usage();
         int ret = cmd_info(argv[2]);
+        exits(ret ? "error" : nil);
+    }
+    else if (strcmp(argv[1], "upgrade") == 0) {
+        if (argc < 4) usage();
+        int arch_id = 0;
+        float rope_theta = 0.0f;
+        if (argc >= 5) {
+            if (strcmp(argv[4], "llama2") == 0) {
+                arch_id = ARCH_LLAMA2;
+                rope_theta = 10000.0f;
+            } else if (strcmp(argv[4], "llama3") == 0) {
+                arch_id = ARCH_LLAMA3;
+                rope_theta = 500000.0f;
+            } else if (strcmp(argv[4], "mistral") == 0) {
+                arch_id = ARCH_MISTRAL;
+                rope_theta = 10000.0f;
+            } else {
+                fprint(STDERR, "Unknown architecture: %s\n", argv[4]);
+                usage();
+            }
+        }
+        int ret = cmd_upgrade(argv[2], argv[3], arch_id, rope_theta);
         exits(ret ? "error" : nil);
     }
     else if (strcmp(argv[1], "quantize") == 0) {

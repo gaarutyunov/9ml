@@ -108,6 +108,9 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_softmax_simd.c",
         TESTS_DIR "/test_rmsnorm_simd.c",
         TESTS_DIR "/test_simd_debug2.c",
+        TESTS_DIR "/test_arch_detect.c",
+        TESTS_DIR "/test_arch_llama3.c",
+        TESTS_DIR "/test_format_detect.c",
         NULL
     };
 
@@ -119,6 +122,33 @@ static int prepare_shared_disk(void) {
             fprintf(stderr, "Failed to copy %s\n", src);
             return -1;
         }
+    }
+
+    /* Create arch directory and copy arch plugin files */
+    fat_mkdir(SHARED_IMAGE, "arch");
+    const char *arch_files[] = {
+        SRC_DIR "/arch/arch.h",
+        SRC_DIR "/arch/arch.c",
+        SRC_DIR "/arch/llama2.c",
+        SRC_DIR "/arch/llama3.c",
+        SRC_DIR "/arch/mistral.c",
+        NULL
+    };
+    for (int i = 0; arch_files[i]; i++) {
+        const char *src = arch_files[i];
+        const char *name = strrchr(src, '/');
+        name = name ? name + 1 : src;
+        if (fat_copy_to_dir(SHARED_IMAGE, src, "arch", name) != 0) {
+            fprintf(stderr, "Failed to copy %s\n", src);
+            return -1;
+        }
+    }
+
+    /* Also copy core/kernels.h for arch plugins */
+    fat_mkdir(SHARED_IMAGE, "core");
+    if (fat_copy_to_dir(SHARED_IMAGE, SRC_DIR "/core/kernels.h", "core", "kernels.h") != 0) {
+        fprintf(stderr, "Failed to copy core/kernels.h\n");
+        return -1;
     }
 
     /* Copy model files if present */
@@ -199,6 +229,10 @@ static int run_vm_tests(void) {
     /* Compile SIMD assembly first (needed by run.c, runq.c, benchmark, llmfs) */
     run_vm_cmd("6a simd_amd64.s >[2=1] > simd_asm.log; echo asm_done", 30);
 
+    /* Compile arch plugin library (needed by run.c which includes model.c) */
+    run_vm_cmd("cd arch && 6c -w arch.c llama2.c llama3.c mistral.c >[2=1] > ../arch_compile.log; echo arch_compile_done", 60);
+    run_vm_cmd("cd arch && ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 >[2=1] >> ../arch_compile.log; echo arch_lib_done", 30);
+
     /* Compile and run each test (basic tests define DISABLE_THREADING in their source) */
     run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 && ./t_rmsnorm > rmsnorm.out", 15);
     run_vm_cmd("6c -w test_softmax.c && 6l -o t_softmax test_softmax.6 && ./t_softmax > softmax.out", 15);
@@ -210,9 +244,9 @@ static int run_vm_tests(void) {
 
     /* Generation test (needs model files) */
     /* Note: Plan 9 rc shell uses >[2] for stderr, not 2> */
-    /* Link with simd_amd64.6 for SSE vectorized SIMD functions */
-    run_vm_cmd("6c -w run.c", 60);
-    run_vm_cmd("6l -o run run.6 simd_amd64.6", 30);
+    /* Link with simd_amd64.6 for SSE vectorized SIMD functions and arch.a6 for plugins */
+    run_vm_cmd("6c -w run.c >[2=1] > run_compile.log; echo run_compile_done", 60);
+    run_vm_cmd("6l -o run run.6 simd_amd64.6 arch/arch.a6 >[2=1] >> run_compile.log; echo run_link_done", 30);
     run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation.out >[2=1]", 120);
 
     /* Generation test WITH SIMD - must produce same output as scalar */
@@ -276,6 +310,21 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w test_simd_debug2.c", 60);
     run_vm_cmd("6l -o t_simd_debug2 test_simd_debug2.6 simd_amd64.6", 30);
     run_vm_cmd("./t_simd_debug2 > simd_debug2.out >[2=1]", 60);
+
+    /* Architecture detection test */
+    run_vm_cmd("6c -w test_arch_detect.c", 60);
+    run_vm_cmd("6l -o t_arch_detect test_arch_detect.6", 30);
+    run_vm_cmd("./t_arch_detect > arch_detect.out >[2=1]", 60);
+
+    /* LLaMA 3 architecture test */
+    run_vm_cmd("6c -w test_arch_llama3.c", 60);
+    run_vm_cmd("6l -o t_arch_llama3 test_arch_llama3.6", 30);
+    run_vm_cmd("./t_arch_llama3 > arch_llama3.out >[2=1]", 60);
+
+    /* Format detection test */
+    run_vm_cmd("6c -w test_format_detect.c", 60);
+    run_vm_cmd("6l -o t_format_detect test_format_detect.6", 30);
+    run_vm_cmd("./t_format_detect > format_detect.out >[2=1]", 60);
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -1007,15 +1056,136 @@ static void test_rmsnorm_simd(void) {
     free(data);
 }
 
+/* Test: architecture detection */
+static void test_arch_detect(void) {
+    printf("Testing arch_detect... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "arch_detect.out", &size);
+    if (!data || size == 0) {
+        add_result("arch_detect", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "detection tests passed") != NULL) {
+        add_result("arch_detect", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("arch_detect", 0, 0, "architecture detection failed");
+        printf("FAIL (architecture detection failed)\n");
+    } else {
+        add_result("arch_detect", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Architecture detection output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: LLaMA 3 architecture */
+static void test_arch_llama3(void) {
+    printf("Testing arch_llama3... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "arch_llama3.out", &size);
+    if (!data || size == 0) {
+        add_result("arch_llama3", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "LLaMA 3 tests passed") != NULL) {
+        add_result("arch_llama3", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("arch_llama3", 0, 0, "LLaMA 3 architecture test failed");
+        printf("FAIL (LLaMA 3 architecture test failed)\n");
+    } else {
+        add_result("arch_llama3", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  LLaMA 3 architecture output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Result") || strstr(line, "theta")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: format detection */
+static void test_format_detect(void) {
+    printf("Testing format_detect... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "format_detect.out", &size);
+    if (!data || size == 0) {
+        add_result("format_detect", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "format detection tests passed") != NULL) {
+        add_result("format_detect", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("format_detect", 0, 0, "format detection test failed");
+        printf("FAIL (format detection test failed)\n");
+    } else {
+        add_result("format_detect", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Format detection output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
 /* Run llmfs tests in single VM (local mount) */
 static void run_vm_llmfs_local(void) {
     printf("\n==================================================\n");
     printf("Running llmfs local tests in Plan 9...\n");
     printf("==================================================\n\n");
 
-    /* Compile llmfs - capture errors (SSE SIMD in simd_amd64.s) */
+    /* Compile llmfs - capture errors (SSE SIMD in simd_amd64.s, arch plugins) */
     run_vm_cmd("6c -w llmfs.c >[2=1] > llmfs_compile.log; echo compile_done", 120);
-    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 >[2=1] >> llmfs_compile.log; echo link_done", 60);
+    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfs_compile.log; echo link_done", 60);
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
@@ -1146,11 +1316,16 @@ static int run_dualvm_llmfs_remote(void) {
     /* Configure network */
     dualvm_configure_network(&dualvm);
 
-    /* CPU VM: Compile llmfs (SSE SIMD in simd_amd64.s) */
+    /* CPU VM: Compile arch plugin library */
+    printf("CPU: Compiling arch plugins...\n");
+    qemu_sendln_wait(&dualvm.cpu, "cd arch && 6c -w arch.c llama2.c llama3.c mistral.c", 60);
+    qemu_sendln_wait(&dualvm.cpu, "cd arch && ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6", 30);
+
+    /* CPU VM: Compile llmfs (SSE SIMD in simd_amd64.s, arch plugins) */
     printf("CPU: Compiling llmfs...\n");
     qemu_sendln_wait(&dualvm.cpu, "6a simd_amd64.s", 30);
     qemu_sendln_wait(&dualvm.cpu, "6c -w llmfs.c", 120);
-    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6", 60);
+    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6", 60);
 
     /* CPU VM: Start llmfs server and mount it locally */
     printf("CPU: Starting llmfs server...\n");
@@ -1386,6 +1561,9 @@ int main(int argc, char *argv[]) {
     if (should_run_test("simd_debug")) test_simd_debug();
     if (should_run_test("softmax_simd")) test_softmax_simd();
     if (should_run_test("rmsnorm_simd")) test_rmsnorm_simd();
+    if (should_run_test("arch_detect")) test_arch_detect();
+    if (should_run_test("arch_llama3")) test_arch_llama3();
+    if (should_run_test("format_detect")) test_format_detect();
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
 
