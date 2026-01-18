@@ -235,17 +235,19 @@ static int run_vm_tests(void) {
     run_vm_cmd("6a simdq_amd64.s >[2=1] > simdq_asm.log; echo asm_done", 30);
 
     /* Compile arch plugin library (needed by run.c which includes model.c) */
-    run_vm_cmd("cd arch && 6c -w arch.c llama2.c llama3.c mistral.c >[2=1] > ../arch_compile.log; echo arch_compile_done", 60);
-    run_vm_cmd("cd arch && ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 >[2=1] >> ../arch_compile.log; echo arch_lib_done", 30);
+    /* Use subshell @{} to avoid changing current directory */
+    run_vm_cmd("@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c } >[2=1] > arch_compile.log; echo arch_compile_done", 60);
+    run_vm_cmd("@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 } >[2=1] >> arch_compile.log; echo arch_lib_done", 30);
 
     /* Compile and run each test (basic tests define DISABLE_THREADING in their source) */
-    run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 && ./t_rmsnorm > rmsnorm.out", 15);
-    run_vm_cmd("6c -w test_softmax.c && 6l -o t_softmax test_softmax.6 && ./t_softmax > softmax.out", 15);
-    run_vm_cmd("6c -w test_matmul.c && 6l -o t_matmul test_matmul.6 && ./t_matmul > matmul.out", 15);
-    run_vm_cmd("6c -w test_rng.c && 6l -o t_rng test_rng.6 && ./t_rng > rng.out", 15);
+    /* Tests that include model.c need arch/arch.a6 for arch plugin symbols */
+    run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 arch/arch.a6 && ./t_rmsnorm > rmsnorm.out", 15);
+    run_vm_cmd("6c -w test_softmax.c && 6l -o t_softmax test_softmax.6 arch/arch.a6 && ./t_softmax > softmax.out", 15);
+    run_vm_cmd("6c -w test_matmul.c && 6l -o t_matmul test_matmul.6 arch/arch.a6 && ./t_matmul > matmul.out", 15);
+    run_vm_cmd("6c -w test_rng.c && 6l -o t_rng test_rng.6 arch/arch.a6 && ./t_rng > rng.out", 15);
     run_vm_cmd("6c -w test_quantize.c && 6l -o t_quantize test_quantize.6 && ./t_quantize > quantize.out", 15);
     run_vm_cmd("6c -w test_quantized_matmul.c && 6l -o t_qmatmul test_quantized_matmul.6 && ./t_qmatmul > quantized_matmul.out", 15);
-    run_vm_cmd("6c -w test_model_loading.c && 6l -o t_model test_model_loading.6 && ./t_model > model_loading.out", 15);
+    run_vm_cmd("6c -w test_model_loading.c && 6l -o t_model test_model_loading.6 arch/arch.a6 && ./t_model > model_loading.out", 15);
 
     /* Generation test (needs model files) */
     /* Note: Plan 9 rc shell uses >[2] for stderr, not 2> */
@@ -262,58 +264,58 @@ static int run_vm_tests(void) {
     run_vm_cmd("6l -o runq runq.6 simd_amd64.6 simdq_amd64.6", 30);
     run_vm_cmd("./runq stories15M_q80.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation_q.out >[2=1]", 120);
 
-    /* Simple threading test first (no SIMD linked) */
+    /* Simple threading test first (no SIMD linked) - includes model.c, needs arch */
     run_vm_cmd("6c -w test_thread_simple.c", 30);
-    run_vm_cmd("6l -o t_thread test_thread_simple.6", 30);
+    run_vm_cmd("6l -o t_thread test_thread_simple.6 arch/arch.a6", 30);
     run_vm_cmd("./t_thread > thread_simple.out >[2=1]", 60);
 
-    /* Thread test with SIMD linked (SIMD not called) */
+    /* Thread test with SIMD linked (SIMD not called) - includes model.c, needs arch */
     run_vm_cmd("6c -w test_thread_with_simd.c", 30);
-    run_vm_cmd("6l -o t_thread_simd test_thread_with_simd.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_thread_simd test_thread_with_simd.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_thread_simd > thread_simd.out >[2=1]", 60);
 
-    /* Thread test with struct (like model.c) - without SIMD */
+    /* Thread test with struct (like model.c) - includes model.c, needs arch */
     run_vm_cmd("6c -w test_thread_struct.c", 30);
-    run_vm_cmd("6l -o t_thread_struct test_thread_struct.6", 30);
+    run_vm_cmd("6l -o t_thread_struct test_thread_struct.6 arch/arch.a6", 30);
     run_vm_cmd("./t_thread_struct > thread_struct.out >[2=1]", 60);
 
-    /* Thread test with struct + SIMD linked */
-    run_vm_cmd("6l -o t_thread_struct_simd test_thread_struct.6 simd_amd64.6", 30);
+    /* Thread test with struct + SIMD linked - includes model.c, needs arch */
+    run_vm_cmd("6l -o t_thread_struct_simd test_thread_struct.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_thread_struct_simd > thread_struct_simd.out >[2=1]", 60);
 
-    /* Test pool_create from model.c */
+    /* Test pool_create from model.c - includes model.c, needs arch */
     run_vm_cmd("6c -w test_model_pool.c", 60);
-    run_vm_cmd("6l -o t_model_pool test_model_pool.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_model_pool test_model_pool.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_model_pool > model_pool.out >[2=1]", 60);
 
-    /* Benchmark test */
+    /* Benchmark test - includes model.c, needs arch */
     run_vm_cmd("6c -w test_benchmark.c", 60);
-    run_vm_cmd("6l -o t_benchmark test_benchmark.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_benchmark test_benchmark.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_benchmark > benchmark.out >[2=1]", 300);
 
-    /* SIMD validation test */
+    /* SIMD validation test - includes model.c, needs arch */
     run_vm_cmd("6c -w test_simd_validation.c", 60);
-    run_vm_cmd("6l -o t_simd_validation test_simd_validation.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_simd_validation test_simd_validation.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_simd_validation > simd_validation.out >[2=1]", 300);
 
-    /* SIMD debug test (minimal) */
+    /* SIMD debug test (minimal) - includes model.c, needs arch */
     run_vm_cmd("6c -w test_simd_debug.c", 60);
-    run_vm_cmd("6l -o t_simd_debug test_simd_debug.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_simd_debug test_simd_debug.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_simd_debug > simd_debug.out >[2=1]", 60);
 
-    /* Softmax SIMD validation test */
+    /* Softmax SIMD validation test - includes model.c, needs arch */
     run_vm_cmd("6c -w test_softmax_simd.c", 60);
-    run_vm_cmd("6l -o t_softmax_simd test_softmax_simd.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_softmax_simd test_softmax_simd.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_softmax_simd > softmax_simd.out >[2=1]", 120);
 
-    /* RMSNorm SIMD validation test */
+    /* RMSNorm SIMD validation test - includes model.c, needs arch */
     run_vm_cmd("6c -w test_rmsnorm_simd.c", 60);
-    run_vm_cmd("6l -o t_rmsnorm_simd test_rmsnorm_simd.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_rmsnorm_simd test_rmsnorm_simd.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_rmsnorm_simd > rmsnorm_simd.out >[2=1]", 120);
 
-    /* SIMD debug test 2 - minimal test to isolate denormal issue */
+    /* SIMD debug test 2 - minimal test to isolate denormal issue - includes model.c, needs arch */
     run_vm_cmd("6c -w test_simd_debug2.c", 60);
-    run_vm_cmd("6l -o t_simd_debug2 test_simd_debug2.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_simd_debug2 test_simd_debug2.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_simd_debug2 > simd_debug2.out >[2=1]", 60);
 
     /* Architecture detection test */
@@ -331,14 +333,14 @@ static int run_vm_tests(void) {
     run_vm_cmd("6l -o t_format_detect test_format_detect.6", 30);
     run_vm_cmd("./t_format_detect > format_detect.out >[2=1]", 60);
 
-    /* Softmax benchmark test */
+    /* Softmax benchmark test - includes model.c, needs arch */
     run_vm_cmd("6c -w test_softmax_benchmark.c", 60);
-    run_vm_cmd("6l -o t_softmax_bench test_softmax_benchmark.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_softmax_bench test_softmax_benchmark.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_softmax_bench > softmax_benchmark.out >[2=1]", 300);
 
-    /* Softmax accuracy test */
+    /* Softmax accuracy test - includes model.c, needs arch */
     run_vm_cmd("6c -w test_softmax_accuracy.c", 60);
-    run_vm_cmd("6l -o t_softmax_acc test_softmax_accuracy.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o t_softmax_acc test_softmax_accuracy.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_softmax_acc > softmax_accuracy.out >[2=1]", 300);
 
     /* Mark completion */
@@ -1427,10 +1429,10 @@ static int run_dualvm_llmfs_remote(void) {
     /* Configure network */
     dualvm_configure_network(&dualvm);
 
-    /* CPU VM: Compile arch plugin library */
+    /* CPU VM: Compile arch plugin library (use subshell to not change cwd) */
     printf("CPU: Compiling arch plugins...\n");
-    qemu_sendln_wait(&dualvm.cpu, "cd arch && 6c -w arch.c llama2.c llama3.c mistral.c", 60);
-    qemu_sendln_wait(&dualvm.cpu, "cd arch && ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6", 30);
+    qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c }", 60);
+    qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 }", 30);
 
     /* CPU VM: Compile llmfs (SSE SIMD in simd_amd64.s, arch plugins) */
     printf("CPU: Compiling llmfs...\n");
