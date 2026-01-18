@@ -6,6 +6,9 @@ A port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front). R
 
 - **FP32 inference** (`run.c`) - Full precision transformer inference
 - **INT8 quantized inference** (`runq.c`) - 4x smaller models with quantization
+- **SIMD acceleration** - SSE2 assembly for 5.7x matmul speedup
+- **Multi-threading** - Parallel attention heads via Plan 9 libthread
+- **9P file server** (`llmfs`) - Distributed inference over the network
 - **Pure Plan 9 C** - No external dependencies, uses only Plan 9 libc
 - **Pure C test suite** - No Python or shell scripts required
 - **Cross-platform** - Build and test on Linux, run natively on Plan 9
@@ -110,6 +113,56 @@ make export
 ./export quantize stories15M.bin stories15M_q80.bin
 ```
 
+## Performance Optimizations
+
+### SIMD Vectorization (SSE2)
+
+The inference engine uses hand-written SSE2 assembly for critical operations:
+
+| Operation | Implementation | Speedup |
+|-----------|---------------|---------|
+| matmul | SSE2 assembly | ~5.7x |
+| rmsnorm | SSE2 assembly | ~3x |
+| dot_product | SSE2 assembly | ~4x |
+| vec_add, vec_scale | SSE2 assembly | ~4x |
+| softmax | C with unrolling | ~2x |
+
+The SIMD implementation uses:
+- 8-element unrolled loops with 2 accumulators
+- 4-element cleanup loop for remainders
+- Scalar fallback for non-aligned tails
+- Horizontal sum via SHUFPS for reductions
+
+### Thread Pool
+
+Parallel execution uses Plan 9's libthread:
+- Auto-detects CPU count from `/dev/sysstat`
+- Channel-based work distribution
+- Parallel attention head computation
+
+### Benchmark Results
+
+Tested on stories15M model with 1024x1024 matmul:
+
+| Mode | GFLOPS | Speedup |
+|------|--------|---------|
+| Scalar (1 thread) | 3.4 | 1.0x |
+| SIMD (1 thread) | 19.0 | 5.7x |
+| SIMD (4 threads) | 18.7 | 5.6x |
+
+Token generation throughput: ~180-200 tok/s on stories15M.
+
+Note: Multi-threading overhead can exceed benefit for small matrices.
+
+### Runtime Configuration
+
+Command-line flags:
+```rc
+./run model.bin -z tok.bin --no-simd     # Disable SIMD
+./run model.bin -z tok.bin --threads 2   # Set thread count
+./run model.bin -z tok.bin -j 4          # Short form for threads
+```
+
 ## Project Structure
 
 ```
@@ -120,6 +173,11 @@ make export
 │   ├── model.c            # Model loading helpers
 │   ├── modelq.c           # Quantized model helpers
 │   ├── export.c           # Model export/conversion tool
+│   ├── llmfs.c            # 9P file server for remote inference
+│   ├── simd.h             # SIMD function declarations
+│   ├── simd_amd64.s       # SSE2 assembly (matmul, rmsnorm, etc.)
+│   ├── parallel.h         # Thread pool declarations
+│   ├── parallel.c         # Thread pool implementation
 │   ├── mkfile             # Plan 9 build file
 │   └── tests/             # Plan 9 test source files
 ├── test/                  # C test harness (Linux host)

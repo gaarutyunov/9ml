@@ -484,6 +484,72 @@ Stack layout (verified empirically):
 
 Important: Use `SUBL/TESTL/JLE` pattern instead of `CMPL/JGE` for loop comparisons - the Plan 9 assembler's comparison semantics differ from standard x86.
 
+### SIMD Assembly Implementation Notes
+
+The `simd_amd64.s` file contains SSE2 implementations for performance-critical operations:
+
+#### Frame Size Matters
+Use `$0` frame size (no local stack variables) for simple functions:
+```asm
+TEXT matmul_simd(SB), $0    // Works - no local frame
+TEXT rmsnorm_simd(SB), $0   // Works - no local frame
+```
+
+Using `$8` or other frame sizes changes stack argument offsets and can cause memory faults. If you need temp storage, use registers instead of stack.
+
+#### BYTE-Encoded Instructions
+Plan 9 assembler doesn't support all SSE instructions. Use BYTE encoding:
+
+```asm
+// CVTSI2SS R14, X1 (convert int64 in R14 to float in X1)
+// F3 49 0F 2A CE = REX.WB prefix + opcode + ModR/M
+BYTE $0xF3; BYTE $0x49; BYTE $0x0F; BYTE $0x2A; BYTE $0xCE
+
+// MOVD R8d, X0 (move 32-bit from R8 to XMM0)
+// 66 41 0F 6E C0 = operand-size + REX.B + opcode + ModR/M
+BYTE $0x66; BYTE $0x41; BYTE $0x0F; BYTE $0x6E; BYTE $0xC0
+
+// SQRTSS X0, X1 (sqrt of X0 into X1)
+// F3 0F 51 C8
+BYTE $0xF3; BYTE $0x0F; BYTE $0x51; BYTE $0xC8
+
+// RSQRTSS X0, X1 (approximate 1/sqrt of X0 into X1)
+// F3 0F 52 C8
+BYTE $0xF3; BYTE $0x0F; BYTE $0x52; BYTE $0xC8
+```
+
+#### Approximate vs Exact Instructions
+- `RSQRTSS` - approximate reciprocal sqrt, relative error ~0.0004 (fast but inaccurate)
+- `SQRTSS` + `DIVSS` - exact sqrt (slower but matches scalar `sqrtf()`)
+
+For rmsnorm, use exact SQRTSS to match scalar output:
+```asm
+// Compute exact 1/sqrt
+SQRTSS X0, X1           // X1 = sqrt(X0)
+MOVL $0x3F800000, R8    // 1.0f in IEEE 754
+MOVD R8, X0             // X0 = 1.0
+DIVSS X1, X0            // X0 = 1.0 / sqrt(...)
+```
+
+#### Plan 9 FPU Exception Handling
+Plan 9 enables floating-point exceptions by default. To disable:
+```c
+setfcr(getfcr() & ~(FPINVAL|FPZDIV|FPOVFL|FPUNFL|FPINEX));
+```
+
+This affects x87 FPU but SSE MXCSR is typically initialized with exceptions masked (0x1F80).
+
+#### Debugging Tips
+1. Memory faults often indicate wrong stack offsets - verify with matmul_simd pattern
+2. Denormal exceptions suggest RSQRTSS with very small values - use SQRTSS+DIVSS
+3. Add pointer validation at function entry for debugging:
+```asm
+TESTQ DI, DI
+JZ bad_ptr
+TESTQ SI, SI
+JZ bad_ptr
+```
+
 ### No bsearch
 
 Implement binary search manually:

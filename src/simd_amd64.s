@@ -219,11 +219,27 @@ dot_horizontal:
 //   x:      16(SP)     - input vector
 //   weight: 24(SP)     - weight vector
 //   size:   32(SP)     - vector size
-TEXT rmsnorm_simd(SB), $8
+//
+// Note: Using $0 frame (no stack locals) to match matmul_simd.
+// All temp values stored in registers.
+TEXT rmsnorm_simd(SB), $0
 	MOVQ	BP, DI			// DI = output
 	MOVQ	16(SP), SI		// SI = input x
 	MOVQ	24(SP), DX		// DX = weight
 	MOVL	32(SP), CX		// CX = size
+
+	// Validate pointers
+	TESTQ	DI, DI
+	JZ	rms_bad_ptr
+	TESTQ	SI, SI
+	JZ	rms_bad_ptr
+	TESTQ	DX, DX
+	JZ	rms_bad_ptr
+	TESTL	CX, CX
+	JLE	rms_bad_size
+
+	// Save size in R14 for later use
+	MOVL	CX, R14
 
 	// First pass: compute sum of squares using SSE
 	XORPS	X0, X0			// X0 = ss accumulator
@@ -268,23 +284,32 @@ rms_compute_scale:
 	// X0[0] = ss (sum of squares)
 
 	// Divide by size: ss / size
-	// Use memory to convert int to float (6a doesn't support CVTSI2SS)
-	MOVL	CX, -4(SP)		// store size to stack
-	CVTSL2SS	-4(SP), X1	// X1 = (float)size
+	// Convert size (in R14) to float using CVTSI2SS reg-to-reg
+	XORPS	X1, X1
+	// CVTSI2SS: F3 0F 2A /r - Convert Dword Integer to Scalar Single
+	// We want: CVTSI2SS R14, X1  (convert R14 to float in X1)
+	// ModR/M = C6 = 11 000 110 = reg=X1, r/m=R14 (need REX.B for R14)
+	// REX.W for 64-bit source: 48, REX.WB for R14: 49
+	// F3 49 0F 2A CE = CVTSI2SS X1, R14
+	BYTE $0xF3; BYTE $0x49; BYTE $0x0F; BYTE $0x2A; BYTE $0xCE
 	DIVSS	X1, X0			// X0 = ss / size
 
-	// Add epsilon (1e-5)
-	MOVL	$0x3727C5AC, R8		// 1e-5 in IEEE 754
-	MOVL	R8, -4(SP)
-	ADDSS	-4(SP), X0		// X0 = ss/size + 1e-5
+	// Add epsilon (1e-5 = 0x3727C5AC in IEEE 754)
+	// Load via MOVD from register
+	MOVL	$0x3727C5AC, R8
+	// MOVD R8d, X2: 66 41 0F 6E D0 (need REX.B for R8)
+	BYTE $0x66; BYTE $0x41; BYTE $0x0F; BYTE $0x6E; BYTE $0xD0
+	ADDSS	X2, X0			// X0 = ss/size + 1e-5
 
-	// Compute 1/sqrt using SQRTSS + DIVSS (RSQRTSS may not be supported)
-	SQRTSS	X0, X1			// X1 = sqrt(ss/size + eps)
-	MOVL	$0x3F800000, R8		// 1.0f
-	MOVL	R8, -4(SP)
-	MOVSS	-4(SP), X2		// X2 = 1.0
-	DIVSS	X1, X2			// X2 = 1.0 / sqrt(...) - this is our scale
-	MOVSS	X2, X1			// X1 = scale
+	// Compute 1/sqrt using exact SQRTSS + DIVSS (matches scalar sqrtf)
+	// SQRTSS X0, X1: F3 0F 51 C8 (X1 = sqrt(X0))
+	BYTE $0xF3; BYTE $0x0F; BYTE $0x51; BYTE $0xC8
+	// Now X1 = sqrt(ss/size + 1e-5)
+	// We need 1/sqrt, so: load 1.0 into X0 and divide
+	MOVL	$0x3F800000, R8		// 1.0f in IEEE 754
+	BYTE $0x66; BYTE $0x41; BYTE $0x0F; BYTE $0x6E; BYTE $0xC0  // MOVD R8d, X0
+	DIVSS	X1, X0			// X0 = 1.0 / sqrt(ss/size + 1e-5)
+	MOVAPS	X0, X1			// X1 = scale (for broadcast)
 
 	// Broadcast scale to all lanes
 	SHUFPS	$0x00, X1, X1		// X1 = [scale, scale, scale, scale]
@@ -325,6 +350,14 @@ rms_norm_remainder:
 	JMP	rms_norm_remainder
 
 rms_done:
+	RET
+
+rms_bad_ptr:
+	// Bad pointer detected - just return without doing anything
+	RET
+
+rms_bad_size:
+	// Bad size detected - just return without doing anything
 	RET
 
 // vec_add_simd(o, a, b, n)

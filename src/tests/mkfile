@@ -16,8 +16,10 @@ BENCH=test_benchmark
 # Quantized benchmark test (no assembly needed)
 BENCH_Q8=test_benchmark_q8
 
-# SIMD validation test (requires SIMD assembly)
+# SIMD validation tests (require SIMD assembly)
 SIMD_VALIDATION=test_simd_validation
+SOFTMAX_SIMD=test_softmax_simd
+RMSNORM_SIMD=test_rmsnorm_simd
 
 # SIMD debug test (minimal, fast)
 SIMD_DEBUG=test_simd_debug
@@ -28,7 +30,7 @@ THREAD_SIMD=test_thread_with_simd
 # SIMD assembly from parent directory
 SIMD_ASM=../simd_amd64.$O ../simdq_amd64.$O
 
-all:V: $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD
+all:V: $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD $SOFTMAX_SIMD $RMSNORM_SIMD
 
 # Standard tests use default rules
 %: %.$O
@@ -53,6 +55,14 @@ $SIMD_DEBUG: $SIMD_DEBUG.$O $SIMD_ASM
 $THREAD_SIMD: $THREAD_SIMD.$O $SIMD_ASM
 	$LD -o $target $prereq
 
+# Softmax SIMD test needs assembly linked
+$SOFTMAX_SIMD: $SOFTMAX_SIMD.$O $SIMD_ASM
+	$LD -o $target $prereq
+
+# RMSNorm SIMD test needs assembly linked
+$RMSNORM_SIMD: $RMSNORM_SIMD.$O $SIMD_ASM
+	$LD -o $target $prereq
+
 # Assembly compilation (if not already built in parent)
 ../simd_amd64.$O: ../simd_amd64.s
 	$AS ../simd_amd64.s
@@ -61,4 +71,4 @@ $THREAD_SIMD: $THREAD_SIMD.$O $SIMD_ASM
 	$AS ../simdq_amd64.s
 
 clean:V:
-	rm -f *.$O $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD *.out
+	rm -f *.$O $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD $SOFTMAX_SIMD $RMSNORM_SIMD *.out
