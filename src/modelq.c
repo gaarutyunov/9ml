@@ -665,28 +665,66 @@ void softmax(float* x, int size) {
     }
 }
 
+/* Scalar quantized matmul - baseline implementation */
+void matmul_q8_scalar(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
+    for (int i = 0; i < d; i++) {
+        float val = 0.0f;
+        int in = i * n;
+
+        int j;
+        for (j = 0; j <= n - GS; j += GS) {
+            int ival = 0;
+            for (int k = 0; k < GS; k++) {
+                ival += ((int) x->q[j + k]) * ((int) w->q[in + j + k]);
+            }
+            val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
+        }
+
+        xout[i] = val;
+    }
+}
+
+/* Optimized quantized matmul with 4x loop unrolling */
+void matmul_q8_unrolled(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
+    for (int i = 0; i < d; i++) {
+        float val = 0.0f;
+        schar *wq = w->q + i * n;
+        schar *xq = x->q;
+        float *ws = w->s + (i * n) / GS;
+        float *xs = x->s;
+
+        int j;
+        for (j = 0; j <= n - GS; j += GS) {
+            /* Unroll inner loop 4x for better ILP */
+            int ival0 = 0, ival1 = 0, ival2 = 0, ival3 = 0;
+            int base = j;
+
+            /* GS is typically 32, so 8 iterations of 4 */
+            for (int k = 0; k < GS; k += 4) {
+                ival0 += (int)xq[base + k] * (int)wq[base + k];
+                ival1 += (int)xq[base + k + 1] * (int)wq[base + k + 1];
+                ival2 += (int)xq[base + k + 2] * (int)wq[base + k + 2];
+                ival3 += (int)xq[base + k + 3] * (int)wq[base + k + 3];
+            }
+
+            int ival = ival0 + ival1 + ival2 + ival3;
+            val += (float)ival * ws[j / GS] * xs[j / GS];
+        }
+
+        xout[i] = val;
+    }
+}
+
+/* Dispatch function - uses optimized version when SIMD is enabled */
 void matmul(float* xout, QuantizedTensor *x, QuantizedTensor *w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
     // by far the most amount of time is spent inside this little function
     // inputs to this function are both quantized
 
-    for (int i = 0; i < d; i++) {
-
-        float val = 0.0f;
-        int ival = 0;
-        int in = i * n;
-
-        // do the matmul in groups of GS
-        int j;
-        for (j = 0; j <= n - GS; j += GS) {
-            for (int k = 0; k < GS; k++) {
-                ival += ((int) x->q[j + k]) * ((int) w->q[in + j + k]);
-            }
-            val += ((float) ival) * w->s[(in + j) / GS] * x->s[j / GS];
-            ival = 0;
-        }
-
-        xout[i] = val;
+    if (opt_config.use_simd) {
+        matmul_q8_unrolled(xout, x, w, n, d);
+    } else {
+        matmul_q8_scalar(xout, x, w, n, d);
     }
 }
 

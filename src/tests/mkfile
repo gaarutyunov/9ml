@@ -13,6 +13,9 @@ TESTS=\
 # Benchmark test (requires SIMD assembly)
 BENCH=test_benchmark
 
+# Quantized benchmark test (no assembly needed)
+BENCH_Q8=test_benchmark_q8
+
 # SIMD validation test (requires SIMD assembly)
 SIMD_VALIDATION=test_simd_validation
 
@@ -25,7 +28,7 @@ THREAD_SIMD=test_thread_with_simd
 # SIMD assembly from parent directory
 SIMD_ASM=../simd_amd64.$O ../simdq_amd64.$O
 
-all:V: $TESTS $BENCH $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD
+all:V: $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD
 
 # Standard tests use default rules
 %: %.$O
@@ -58,4 +61,4 @@ $THREAD_SIMD: $THREAD_SIMD.$O $SIMD_ASM
 	$AS ../simdq_amd64.s
 
 clean:V:
-	rm -f *.$O $TESTS $BENCH $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD *.out
+	rm -f *.$O $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD *.out
