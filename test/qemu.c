@@ -73,8 +73,8 @@ int qemu_start(QemuVM *vm, const char *disk_image, const char *shared_image) {
 
         execlp("qemu-system-x86_64", "qemu-system-x86_64",
                "-m", "512",
-               "-cpu", "max",
-               "-accel", "tcg",
+               "-cpu", "host",
+               "-accel", "kvm",
                "-drive", disk_arg,
                "-drive", shared_arg,
                "-display", "none",
@@ -98,6 +98,85 @@ int qemu_start(QemuVM *vm, const char *disk_image, const char *shared_image) {
     vm->stdout_fd = stdout_pipe[0];
     vm->disk_image = disk_image;
     vm->shared_image = shared_image;
+    vm->net_arg = NULL;
+    vm->is_cpu = 0;
+
+    return 0;
+}
+
+int qemu_start_with_net(QemuVM *vm, const char *disk_image, const char *shared_image,
+                        const char *net_type, int is_cpu) {
+    int stdin_pipe[2];
+    int stdout_pipe[2];
+
+    if (pipe(stdin_pipe) < 0 || pipe(stdout_pipe) < 0) {
+        perror("pipe");
+        return -1;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child - set up pipes and exec qemu */
+        close(stdin_pipe[1]);
+        close(stdout_pipe[0]);
+
+        dup2(stdin_pipe[0], STDIN_FILENO);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stdout_pipe[1], STDERR_FILENO);
+
+        close(stdin_pipe[0]);
+        close(stdout_pipe[1]);
+
+        /* Format drive arguments */
+        char disk_arg[512], shared_arg[512];
+        snprintf(disk_arg, sizeof(disk_arg), "file=%s,format=qcow2,if=virtio", disk_image);
+        /* Disable locking on shared disk so both VMs can access it */
+        snprintf(shared_arg, sizeof(shared_arg), "file=%s,format=raw,if=virtio,file.locking=off", shared_image);
+
+        /* Network arguments */
+        char nic_arg[256], net_arg[256];
+        snprintf(nic_arg, sizeof(nic_arg), "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:%02x",
+                 is_cpu ? 1 : 2);
+        snprintf(net_arg, sizeof(net_arg), "%s", net_type);
+
+        /* CPU VM gets more memory for model loading */
+        const char *mem = is_cpu ? "2048" : "512";
+
+        execlp("qemu-system-x86_64", "qemu-system-x86_64",
+               "-m", mem,
+               "-cpu", "host",
+               "-accel", "kvm",
+               "-drive", disk_arg,
+               "-drive", shared_arg,
+               "-device", nic_arg,
+               "-netdev", net_arg,
+               "-display", "none",
+               "-serial", "mon:stdio",
+               NULL);
+
+        perror("execlp");
+        _exit(1);
+    }
+
+    /* Parent */
+    close(stdin_pipe[0]);
+    close(stdout_pipe[1]);
+
+    int flags = fcntl(stdout_pipe[0], F_GETFL, 0);
+    fcntl(stdout_pipe[0], F_SETFL, flags | O_NONBLOCK);
+
+    vm->pid = pid;
+    vm->stdin_fd = stdin_pipe[1];
+    vm->stdout_fd = stdout_pipe[0];
+    vm->disk_image = disk_image;
+    vm->shared_image = shared_image;
+    vm->net_arg = strdup(net_type);
+    vm->is_cpu = is_cpu;
 
     return 0;
 }
@@ -116,6 +195,12 @@ int qemu_sendln(QemuVM *vm, const char *text) {
     if (qemu_send(vm, text) < 0) return -1;
     if (qemu_send(vm, "\n") < 0) return -1;
     return 0;
+}
+
+/* Send command and wait for prompt to return */
+int qemu_sendln_wait(QemuVM *vm, const char *text, int timeout_secs) {
+    if (qemu_sendln(vm, text) < 0) return -1;
+    return qemu_wait_for(vm, "term%", timeout_secs);
 }
 
 int qemu_wait_for(QemuVM *vm, const char *pattern, int timeout_secs) {
@@ -184,4 +269,108 @@ int qemu_shutdown(QemuVM *vm) {
 void qemu_killall(void) {
     system("pkill -9 -f qemu-system 2>/dev/null");
     sleep(1);
+}
+
+/* Dual-VM management */
+
+int dualvm_start(DualVM *d, const char *cpu_disk, const char *term_disk, const char *shared_image) {
+    memset(d, 0, sizeof(*d));
+
+    printf("Starting CPU VM (server)...\n");
+
+    /* CPU VM listens on socket */
+    char cpu_net[256];
+    snprintf(cpu_net, sizeof(cpu_net),
+             "socket,id=net0,listen=:%d", CPU_VM_NET_PORT);
+
+    if (qemu_start_with_net(&d->cpu, cpu_disk, shared_image, cpu_net, 1) != 0) {
+        fprintf(stderr, "Failed to start CPU VM\n");
+        return -1;
+    }
+
+    /* Give CPU VM time to start listening on socket */
+    sleep(5);
+
+    printf("Starting Terminal VM (client)...\n");
+
+    /* Terminal VM connects to CPU */
+    char term_net[256];
+    snprintf(term_net, sizeof(term_net),
+             "socket,id=net0,connect=127.0.0.1:%d", CPU_VM_NET_PORT);
+
+    if (qemu_start_with_net(&d->terminal, term_disk, shared_image, term_net, 0) != 0) {
+        fprintf(stderr, "Failed to start Terminal VM\n");
+        qemu_shutdown(&d->cpu);
+        return -1;
+    }
+
+    return 0;
+}
+
+int dualvm_shutdown(DualVM *d) {
+    qemu_shutdown(&d->terminal);
+    qemu_shutdown(&d->cpu);
+    return 0;
+}
+
+int dualvm_boot_and_mount_shared(DualVM *d) {
+    /* Boot CPU VM */
+    printf("Waiting for CPU VM bootargs...\n");
+    if (qemu_wait_for(&d->cpu, "bootargs", 60) < 0) {
+        fprintf(stderr, "Timeout waiting for CPU VM bootargs\n");
+        return -1;
+    }
+    qemu_sendln(&d->cpu, "");
+    printf("Waiting for CPU VM user prompt...\n");
+    if (qemu_wait_for(&d->cpu, "user", 60) < 0) {
+        fprintf(stderr, "Timeout waiting for CPU VM user\n");
+        return -1;
+    }
+    qemu_sendln(&d->cpu, "");
+    printf("Waiting for CPU VM shell...\n");
+    if (qemu_wait_for(&d->cpu, "term%", 120) < 0) {
+        fprintf(stderr, "Timeout waiting for CPU VM shell\n");
+        return -1;
+    }
+
+    /* Boot Terminal VM */
+    printf("Waiting for Terminal VM bootargs...\n");
+    if (qemu_wait_for(&d->terminal, "bootargs", 60) < 0) {
+        fprintf(stderr, "Timeout waiting for Terminal VM bootargs\n");
+        return -1;
+    }
+    qemu_sendln(&d->terminal, "");
+    printf("Waiting for Terminal VM user prompt...\n");
+    if (qemu_wait_for(&d->terminal, "user", 60) < 0) {
+        fprintf(stderr, "Timeout waiting for Terminal VM user\n");
+        return -1;
+    }
+    qemu_sendln(&d->terminal, "");
+    printf("Waiting for Terminal VM shell...\n");
+    if (qemu_wait_for(&d->terminal, "term%", 120) < 0) {
+        fprintf(stderr, "Timeout waiting for Terminal VM shell\n");
+        return -1;
+    }
+
+    /* Mount shared disk ONLY on CPU VM (FAT doesn't support concurrent access) */
+    printf("Mounting shared disk on CPU VM...\n");
+    qemu_sendln_wait(&d->cpu, "dossrv -f /dev/sdG0/data shared", 10);
+    qemu_sendln_wait(&d->cpu, "mount -c /srv/shared /mnt/host", 10);
+    qemu_sendln_wait(&d->cpu, "cd /mnt/host", 5);
+
+    /* Terminal VM does NOT mount shared disk - will use 9P network instead */
+    printf("Terminal VM ready (no shared disk - uses 9P network)...\n");
+
+    return 0;
+}
+
+int dualvm_configure_network(DualVM *d) {
+    /* Configure IP addresses on both VMs */
+    printf("Configuring network on CPU VM...\n");
+    qemu_sendln_wait(&d->cpu, "ip/ipconfig ether /net/ether0 10.0.0.2 255.255.255.0", 10);
+
+    printf("Configuring network on Terminal VM...\n");
+    qemu_sendln_wait(&d->terminal, "ip/ipconfig ether /net/ether0 10.0.0.3 255.255.255.0", 10);
+
+    return 0;
 }

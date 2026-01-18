@@ -1,6 +1,6 @@
 </$objtype/mkfile
 
-TARG=run runq export
+TARG=run runq export llmfs
 
 all:V: $TARG
 
@@ -11,6 +11,10 @@ runq: runq.$O
 	$LD -o $target $prereq
 
 export: export.$O
+	$LD -o $target $prereq
+
+# llmfs requires lib9p and libthread
+llmfs: llmfs.$O
 	$LD -o $target $prereq
 
 %.$O: %.c

@@ -10,7 +10,19 @@ typedef struct {
     int stdout_fd;      /* Read serial output */
     const char *disk_image;
     const char *shared_image;
+    char *net_arg;      /* Network argument (for socket networking) */
+    int is_cpu;         /* 1 if this is the CPU (server) VM */
 } QemuVM;
+
+/* Dual-VM setup for remote 9P testing */
+typedef struct {
+    QemuVM cpu;         /* Server VM running llmfs */
+    QemuVM terminal;    /* Client VM mounting remote fs */
+} DualVM;
+
+/* Network ports for socket networking between VMs */
+#define CPU_VM_NET_PORT 10564
+#define TERMINAL_VM_NET_PORT 10565
 
 /* Download 9front.qcow2 if not present (uses curl) */
 int qemu_ensure_disk(const char *disk_path);
@@ -18,11 +30,18 @@ int qemu_ensure_disk(const char *disk_path);
 /* Start QEMU with 9front */
 int qemu_start(QemuVM *vm, const char *disk_image, const char *shared_image);
 
+/* Start QEMU with socket networking */
+int qemu_start_with_net(QemuVM *vm, const char *disk_image, const char *shared_image,
+                        const char *net_type, int is_cpu);
+
 /* Send a line of text to the VM (simulates keyboard input) */
 int qemu_send(QemuVM *vm, const char *text);
 
 /* Send a line and newline */
 int qemu_sendln(QemuVM *vm, const char *text);
+
+/* Send command and wait for prompt to return */
+int qemu_sendln_wait(QemuVM *vm, const char *text, int timeout_secs);
 
 /* Wait for output containing a pattern (with timeout in seconds) */
 int qemu_wait_for(QemuVM *vm, const char *pattern, int timeout_secs);
@@ -35,5 +54,11 @@ int qemu_shutdown(QemuVM *vm);
 
 /* Kill any lingering QEMU processes */
 void qemu_killall(void);
+
+/* Dual-VM management */
+int dualvm_start(DualVM *d, const char *cpu_disk, const char *term_disk, const char *shared_image);
+int dualvm_shutdown(DualVM *d);
+int dualvm_boot_and_mount_shared(DualVM *d);
+int dualvm_configure_network(DualVM *d);
 
 #endif /* QEMU_H */

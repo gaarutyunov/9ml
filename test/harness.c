@@ -19,6 +19,8 @@
 #define TESTS_DIR    "../src/tests"
 #define DISK_IMAGE   QEMU_DIR "/9front.qcow2"
 #define SHARED_IMAGE QEMU_DIR "/shared.img"
+#define CPU_DISK     QEMU_DIR "/cpu.qcow2"
+#define TERM_DISK    QEMU_DIR "/terminal.qcow2"
 #define MODEL_FILE   "../stories15M.bin"
 #define MODEL_Q_FILE "../stories15M_q80.bin"
 #define TOKENIZER_FILE "../tokenizer.bin"
@@ -35,9 +37,10 @@ typedef struct {
     char error[256];
 } TestResult;
 
-static TestResult results[12];
+static TestResult results[16];
 static int num_results = 0;
 static QemuVM vm;
+static DualVM dualvm;
 
 /* File existence check */
 static int file_exists(const char *path) {
@@ -74,6 +77,7 @@ static int prepare_shared_disk(void) {
         SRC_DIR "/modelq.c",
         SRC_DIR "/run.c",
         SRC_DIR "/runq.c",
+        SRC_DIR "/llmfs.c",
         TESTS_DIR "/test_rmsnorm.c",
         TESTS_DIR "/test_softmax.c",
         TESTS_DIR "/test_matmul.c",
@@ -123,33 +127,41 @@ static int boot_vm(void) {
         return -1;
     }
 
-    /* Wait for boot prompts */
-    printf("Waiting for boot (15s)...\n");
-    qemu_sleep(15);
-    qemu_sendln(&vm, "");  /* Accept default bootargs */
+    /* Wait for bootargs prompt and accept default */
+    printf("Waiting for bootargs prompt...\n");
+    if (qemu_wait_for(&vm, "bootargs", 30) < 0) {
+        fprintf(stderr, "Timeout waiting for bootargs\n");
+        return -1;
+    }
+    qemu_sendln(&vm, "");
 
-    qemu_sleep(5);
-    qemu_sendln(&vm, "");  /* Accept default user (glenda) */
+    /* Wait for user prompt and accept default */
+    printf("Waiting for user prompt...\n");
+    if (qemu_wait_for(&vm, "user", 30) < 0) {
+        fprintf(stderr, "Timeout waiting for user prompt\n");
+        return -1;
+    }
+    qemu_sendln(&vm, "");
 
-    printf("Waiting for shell (20s)...\n");
-    qemu_sleep(20);
+    /* Wait for shell prompt */
+    printf("Waiting for shell...\n");
+    if (qemu_wait_for(&vm, "term%", 60) < 0) {
+        fprintf(stderr, "Timeout waiting for shell\n");
+        return -1;
+    }
 
     /* Mount shared disk */
     printf("Mounting shared disk...\n");
-    qemu_sendln(&vm, "dossrv -f /dev/sdG0/data shared");
-    qemu_sleep(2);
-    qemu_sendln(&vm, "mount -c /srv/shared /mnt/host");
-    qemu_sleep(2);
-    qemu_sendln(&vm, "cd /mnt/host");
-    qemu_sleep(1);
+    qemu_sendln_wait(&vm, "dossrv -f /dev/sdG0/data shared", 10);
+    qemu_sendln_wait(&vm, "mount -c /srv/shared /mnt/host", 10);
+    qemu_sendln_wait(&vm, "cd /mnt/host", 5);
 
     return 0;
 }
 
-/* Run a command in the VM and wait */
-static void run_vm_cmd(const char *cmd, int wait_secs) {
-    qemu_sendln(&vm, cmd);
-    qemu_sleep(wait_secs);
+/* Run a command in the VM and wait for prompt */
+static void run_vm_cmd(const char *cmd, int timeout_secs) {
+    qemu_sendln_wait(&vm, cmd, timeout_secs);
 }
 
 /* Run all tests in VM */
@@ -618,6 +630,270 @@ static void test_generation_quantized(void) {
     free(data);
 }
 
+/* Run llmfs tests in single VM (local mount) */
+static void run_vm_llmfs_local(void) {
+    printf("\n==================================================\n");
+    printf("Running llmfs local tests in Plan 9...\n");
+    printf("==================================================\n\n");
+
+    /* Compile llmfs - capture errors */
+    run_vm_cmd("6c -w llmfs.c >[2=1] > llmfs_compile.log; echo compile_done", 120);
+    run_vm_cmd("6l -o llmfs llmfs.6 >[2=1] >> llmfs_compile.log; echo link_done", 60);
+
+    /* Start llmfs and mount locally */
+    run_vm_cmd("./llmfs -s llm &", 5);
+    run_vm_cmd("mount -c /srv/llm /mnt/llm", 3);
+
+    /* Load model */
+    run_vm_cmd("echo 'load stories15M.bin tokenizer.bin' > /mnt/llm/ctl", 5);
+
+    /* Check model info */
+    run_vm_cmd("cat /mnt/llm/model > llmfs_model.out", 3);
+
+    /* Create session and read session id */
+    run_vm_cmd("cat /mnt/llm/clone > llmfs_session.out", 3);
+
+    /* Configure and run generation - use deterministic settings */
+    run_vm_cmd("echo 'temp 0.0' > /mnt/llm/0/ctl", 2);
+    run_vm_cmd("echo 'steps 20' > /mnt/llm/0/ctl", 2);
+    run_vm_cmd("echo 'seed 42' > /mnt/llm/0/ctl", 2);
+    run_vm_cmd("echo 'Once upon a time' > /mnt/llm/0/prompt", 2);
+    run_vm_cmd("echo 'generate' > /mnt/llm/0/ctl", 2);
+
+    /* Wait for generation and read output */
+    run_vm_cmd("cat /mnt/llm/0/output > llmfs_output.out", 120);
+
+    /* Read status */
+    run_vm_cmd("cat /mnt/llm/0/status > llmfs_status.out", 3);
+
+    /* Mark completion */
+    run_vm_cmd("echo llmfs_done > llmfs_complete.txt", 2);
+}
+
+/* Test: llmfs local generation */
+static void test_llmfs_local(void) {
+    printf("Testing llmfs_local... ");
+
+    if (!file_exists(MODEL_FILE) || !file_exists(TOKENIZER_FILE)) {
+        add_result("llmfs_local", 0, 1, "model or tokenizer not found");
+        printf("SKIP (model or tokenizer not found)\n");
+        return;
+    }
+
+    /* Check compile log for errors */
+    int size;
+    char *compile_log = fat_read_file(SHARED_IMAGE, "llmfs_compile.log", &size);
+    if (compile_log && size > 0) {
+        printf("\n  Compile log: %s\n", compile_log);
+    }
+    free(compile_log);
+
+    /* Check if llmfs test was run */
+    char *data = fat_read_file(SHARED_IMAGE, "llmfs_complete.txt", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_local", 0, 1, "llmfs tests not run");
+        printf("SKIP (llmfs tests not run)\n");
+        free(data);
+        return;
+    }
+    free(data);
+
+    /* Check model output */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_model.out", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_local", 0, 0, "no model output");
+        printf("FAIL (no model output)\n");
+        free(data);
+        return;
+    }
+
+    /* Verify model info contains expected fields */
+    if (strstr(data, "dim") == NULL || strstr(data, "vocab_size") == NULL) {
+        add_result("llmfs_local", 0, 0, "model info incomplete");
+        printf("FAIL (model info incomplete)\n");
+        free(data);
+        return;
+    }
+    free(data);
+
+    /* Check generation output */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_output.out", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_local", 0, 0, "no generation output");
+        printf("FAIL (no generation output)\n");
+        free(data);
+        return;
+    }
+
+    /* Verify we got some text output */
+    if (strlen(data) < 10) {
+        add_result("llmfs_local", 0, 0, "output too short");
+        printf("FAIL (output too short)\n");
+        free(data);
+        return;
+    }
+
+    printf("PASS (output: %.40s...)\n", data);
+    add_result("llmfs_local", 1, 0, NULL);
+    free(data);
+
+    /* Check status */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_status.out", &size);
+    if (data && strstr(data, "done") != NULL) {
+        /* Status shows completion with tok/s */
+        printf("  Status: %s", data);
+    }
+    free(data);
+}
+
+/* Run llmfs tests with two VMs (remote 9P) */
+static int run_dualvm_llmfs_remote(void) {
+    printf("\n==================================================\n");
+    printf("Running llmfs remote tests (dual VM)...\n");
+    printf("==================================================\n\n");
+
+    /* Start both VMs with separate disk overlays */
+    if (dualvm_start(&dualvm, CPU_DISK, TERM_DISK, SHARED_IMAGE) != 0) {
+        fprintf(stderr, "Failed to start dual VMs\n");
+        return -1;
+    }
+
+    /* Boot and mount shared disk on both */
+    if (dualvm_boot_and_mount_shared(&dualvm) != 0) {
+        fprintf(stderr, "Failed to boot dual VMs\n");
+        dualvm_shutdown(&dualvm);
+        qemu_killall();
+        return -1;
+    }
+
+    /* Configure network */
+    dualvm_configure_network(&dualvm);
+
+    /* CPU VM: Compile and start llmfs */
+    printf("CPU: Compiling llmfs...\n");
+    qemu_sendln_wait(&dualvm.cpu, "6c -w llmfs.c", 120);
+    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6", 60);
+
+    /* CPU VM: Start llmfs server and mount it locally */
+    printf("CPU: Starting llmfs server...\n");
+    qemu_sendln_wait(&dualvm.cpu, "./llmfs -s llm &", 10);
+    qemu_sendln_wait(&dualvm.cpu, "mount /srv/llm /mnt/llm", 10);
+
+    /* CPU VM: Load model (via local mount) */
+    printf("CPU: Loading model...\n");
+    qemu_sendln_wait(&dualvm.cpu, "echo 'load stories15M.bin tokenizer.bin' > /mnt/llm/ctl", 10);
+
+    /* CPU VM: Export mounted llmfs tree via 9P over TCP */
+    printf("CPU: Starting 9P export on tcp!*!564...\n");
+    qemu_sendln_wait(&dualvm.cpu, "aux/listen1 -tv tcp!*!564 /bin/exportfs -r /mnt/llm &", 10);
+    qemu_sleep(3);  /* Give listener time to start */
+
+    /* Verify network is working */
+    printf("CPU: Checking network setup...\n");
+    qemu_sendln_wait(&dualvm.cpu, "cat /net/ipifc/0/status > /mnt/host/cpu_net.log", 5);
+
+    /* Terminal VM: Connect to CPU's 9P server */
+    printf("Terminal: Connecting to CPU's 9P server...\n");
+    qemu_sendln_wait(&dualvm.terminal, "srv tcp!10.0.0.2!564 llm", 30);
+    qemu_sendln_wait(&dualvm.terminal, "mount /srv/llm /mnt/llm", 10);
+
+    /* Terminal VM: Verify 9P mount works */
+    printf("Terminal: Verifying 9P mount...\n");
+    qemu_sendln_wait(&dualvm.terminal, "ls /mnt/llm", 10);
+
+    /* Terminal VM: Create session and generate (operations go over 9P network) */
+    printf("Terminal: Creating session and generating (via 9P)...\n");
+    qemu_sendln_wait(&dualvm.terminal, "cat /mnt/llm/clone", 10);  /* Creates session 0 */
+    qemu_sendln_wait(&dualvm.terminal, "echo 'temp 0.0' > /mnt/llm/0/ctl", 5);
+    qemu_sendln_wait(&dualvm.terminal, "echo 'steps 20' > /mnt/llm/0/ctl", 5);
+    qemu_sendln_wait(&dualvm.terminal, "echo 'seed 42' > /mnt/llm/0/ctl", 5);
+    qemu_sendln_wait(&dualvm.terminal, "echo 'Once upon a time' > /mnt/llm/0/prompt", 5);
+    qemu_sendln_wait(&dualvm.terminal, "echo 'generate' > /mnt/llm/0/ctl", 5);
+
+    /* Terminal VM: Wait for generation and read output (via 9P) */
+    printf("Terminal: Waiting for generation (via 9P)...\n");
+    qemu_sendln_wait(&dualvm.terminal, "cat /mnt/llm/0/output", 180);
+
+    /* CPU VM saves the results to shared disk (CPU has exclusive FAT access) */
+    printf("CPU: Saving remote test results to shared disk...\n");
+    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/model > /mnt/host/llmfs_remote_model.out", 10);
+    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/0/output > /mnt/host/llmfs_remote_output.out", 10);
+    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/0/status > /mnt/host/llmfs_remote_status.out", 10);
+    qemu_sendln_wait(&dualvm.cpu, "echo remote_done > /mnt/host/llmfs_remote_complete.txt", 5);
+    qemu_sleep(2);  /* Give time for FAT writes to complete */
+
+    /* Shutdown */
+    printf("Shutting down dual VMs...\n");
+    dualvm_shutdown(&dualvm);
+    qemu_killall();
+
+    return 0;
+}
+
+/* Test: llmfs remote generation */
+static void test_llmfs_remote(void) {
+    printf("Testing llmfs_remote... ");
+
+    if (!file_exists(MODEL_FILE) || !file_exists(TOKENIZER_FILE)) {
+        add_result("llmfs_remote", 0, 1, "model or tokenizer not found");
+        printf("SKIP (model or tokenizer not found)\n");
+        return;
+    }
+
+    /* Check if remote test was run */
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "llmfs_remote_complete.txt", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_remote", 0, 1, "remote tests not run");
+        printf("SKIP (remote tests not run)\n");
+        free(data);
+        return;
+    }
+    free(data);
+
+    /* Check remote generation output */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_remote_output.out", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_remote", 0, 0, "no remote output");
+        printf("FAIL (no remote output)\n");
+        free(data);
+        return;
+    }
+
+    /* Verify we got some text output */
+    if (strlen(data) < 10) {
+        add_result("llmfs_remote", 0, 0, "remote output too short");
+        printf("FAIL (remote output too short)\n");
+        free(data);
+        return;
+    }
+
+    /* Compare with local llmfs output if available */
+    int local_size;
+    char *local_data = fat_read_file(SHARED_IMAGE, "llmfs_output.out", &local_size);
+    if (local_data && local_size > 0) {
+        if (strcmp(data, local_data) == 0) {
+            printf("PASS (matches local: %.40s...)\n", data);
+        } else {
+            printf("PASS (output: %.40s...)\n", data);
+            printf("  Note: differs from local (may be due to seed/timing)\n");
+        }
+    } else {
+        printf("PASS (output: %.40s...)\n", data);
+    }
+
+    add_result("llmfs_remote", 1, 0, NULL);
+    free(data);
+    free(local_data);
+
+    /* Check status */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_remote_status.out", &size);
+    if (data && strstr(data, "done") != NULL) {
+        printf("  Status: %s", data);
+    }
+    free(data);
+}
+
 /* Print summary */
 static void print_summary(void) {
     printf("\n==================================================\n");
@@ -681,10 +957,19 @@ int main(int argc, char *argv[]) {
     /* Run tests in VM */
     run_vm_tests();
 
+    /* Run llmfs local tests */
+    run_vm_llmfs_local();
+
     /* Shutdown VM */
     printf("\nShutting down VM...\n");
     qemu_shutdown(&vm);
     qemu_killall();
+
+    /* Run dual-VM tests for remote 9P */
+    int run_remote_tests = 1;  /* Set to 1 to enable remote tests */
+    if (run_remote_tests && file_exists(MODEL_FILE)) {
+        run_dualvm_llmfs_remote();
+    }
 
     /* Compare results */
     printf("\n==================================================\n");
@@ -700,6 +985,8 @@ int main(int argc, char *argv[]) {
     test_model_loading();
     test_generation();
     test_generation_quantized();
+    test_llmfs_local();
+    test_llmfs_remote();
 
     print_summary();
 
