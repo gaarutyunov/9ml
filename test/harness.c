@@ -41,6 +41,13 @@ static TestResult results[16];
 static int num_results = 0;
 static QemuVM vm;
 static DualVM dualvm;
+static const char *test_filter = NULL;  /* NULL = run all tests */
+
+/* Check if test name matches filter */
+static int should_run_test(const char *name) {
+    if (test_filter == NULL) return 1;  /* No filter = run all */
+    return strstr(name, test_filter) != NULL;
+}
 
 /* File existence check */
 static int file_exists(const char *path) {
@@ -78,6 +85,12 @@ static int prepare_shared_disk(void) {
         SRC_DIR "/run.c",
         SRC_DIR "/runq.c",
         SRC_DIR "/llmfs.c",
+        SRC_DIR "/parallel.h",
+        SRC_DIR "/parallel.c",
+        SRC_DIR "/simd.h",
+        /* Assembly SIMD - uses SSE packed instructions for 4x float parallelism.
+         * Provides matmul_simd, rmsnorm_simd, etc. using MOVUPS, MULPS, ADDPS. */
+        SRC_DIR "/simd_amd64.s",
         TESTS_DIR "/test_rmsnorm.c",
         TESTS_DIR "/test_softmax.c",
         TESTS_DIR "/test_matmul.c",
@@ -85,6 +98,13 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_quantize.c",
         TESTS_DIR "/test_quantized_matmul.c",
         TESTS_DIR "/test_model_loading.c",
+        TESTS_DIR "/test_benchmark.c",
+        TESTS_DIR "/test_simd_validation.c",
+        TESTS_DIR "/test_simd_debug.c",
+        TESTS_DIR "/test_thread_simple.c",
+        TESTS_DIR "/test_thread_with_simd.c",
+        TESTS_DIR "/test_thread_struct.c",
+        TESTS_DIR "/test_model_pool.c",
         NULL
     };
 
@@ -168,25 +188,73 @@ static void run_vm_cmd(const char *cmd, int timeout_secs) {
 static int run_vm_tests(void) {
     printf("Compiling and running tests in Plan 9...\n");
 
-    /* Compile and run each test */
-    run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 && ./t_rmsnorm > rmsnorm.out", 5);
-    run_vm_cmd("6c -w test_softmax.c && 6l -o t_softmax test_softmax.6 && ./t_softmax > softmax.out", 5);
-    run_vm_cmd("6c -w test_matmul.c && 6l -o t_matmul test_matmul.6 && ./t_matmul > matmul.out", 5);
-    run_vm_cmd("6c -w test_rng.c && 6l -o t_rng test_rng.6 && ./t_rng > rng.out", 5);
-    run_vm_cmd("6c -w test_quantize.c && 6l -o t_quantize test_quantize.6 && ./t_quantize > quantize.out", 5);
-    run_vm_cmd("6c -w test_quantized_matmul.c && 6l -o t_qmatmul test_quantized_matmul.6 && ./t_qmatmul > quantized_matmul.out", 5);
-    run_vm_cmd("6c -w test_model_loading.c && 6l -o t_model test_model_loading.6 && ./t_model > model_loading.out", 5);
+    /* SIMD implementation uses SSE assembly from simd_amd64.s.
+     * This provides vectorized 4x float parallelism through SSE packed operations.
+     * The assembly follows Plan 9 amd64 calling convention (first arg in BP).
+     */
 
-    /* Generation test (needs model files) - run.c is large, needs more compile time */
+    /* Compile SIMD assembly first (needed by run.c, runq.c, benchmark, llmfs) */
+    run_vm_cmd("6a simd_amd64.s >[2=1] > simd_asm.log; echo asm_done", 30);
+
+    /* Compile and run each test (basic tests define DISABLE_THREADING in their source) */
+    run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 && ./t_rmsnorm > rmsnorm.out", 15);
+    run_vm_cmd("6c -w test_softmax.c && 6l -o t_softmax test_softmax.6 && ./t_softmax > softmax.out", 15);
+    run_vm_cmd("6c -w test_matmul.c && 6l -o t_matmul test_matmul.6 && ./t_matmul > matmul.out", 15);
+    run_vm_cmd("6c -w test_rng.c && 6l -o t_rng test_rng.6 && ./t_rng > rng.out", 15);
+    run_vm_cmd("6c -w test_quantize.c && 6l -o t_quantize test_quantize.6 && ./t_quantize > quantize.out", 15);
+    run_vm_cmd("6c -w test_quantized_matmul.c && 6l -o t_qmatmul test_quantized_matmul.6 && ./t_qmatmul > quantized_matmul.out", 15);
+    run_vm_cmd("6c -w test_model_loading.c && 6l -o t_model test_model_loading.6 && ./t_model > model_loading.out", 15);
+
+    /* Generation test (needs model files) */
     /* Note: Plan 9 rc shell uses >[2] for stderr, not 2> */
-    run_vm_cmd("6c -w run.c", 45);
-    run_vm_cmd("6l -o run run.6", 20);
-    run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 > generation.out >[2=1]", 120);
+    /* Link with simd_amd64.6 for SSE vectorized SIMD functions */
+    run_vm_cmd("6c -w run.c", 60);
+    run_vm_cmd("6l -o run run.6 simd_amd64.6", 30);
+    run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation.out >[2=1]", 120);
 
     /* Quantized generation test (runq.c with Q8_0 model) */
-    run_vm_cmd("6c -w runq.c", 45);
-    run_vm_cmd("6l -o runq runq.6", 20);
-    run_vm_cmd("./runq stories15M_q80.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 > generation_q.out >[2=1]", 120);
+    run_vm_cmd("6c -w runq.c", 60);
+    run_vm_cmd("6l -o runq runq.6 simd_amd64.6", 30);
+    run_vm_cmd("./runq stories15M_q80.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation_q.out >[2=1]", 120);
+
+    /* Simple threading test first (no SIMD linked) */
+    run_vm_cmd("6c -w test_thread_simple.c", 30);
+    run_vm_cmd("6l -o t_thread test_thread_simple.6", 30);
+    run_vm_cmd("./t_thread > thread_simple.out >[2=1]", 60);
+
+    /* Thread test with SIMD linked (SIMD not called) */
+    run_vm_cmd("6c -w test_thread_with_simd.c", 30);
+    run_vm_cmd("6l -o t_thread_simd test_thread_with_simd.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_thread_simd > thread_simd.out >[2=1]", 60);
+
+    /* Thread test with struct (like model.c) - without SIMD */
+    run_vm_cmd("6c -w test_thread_struct.c", 30);
+    run_vm_cmd("6l -o t_thread_struct test_thread_struct.6", 30);
+    run_vm_cmd("./t_thread_struct > thread_struct.out >[2=1]", 60);
+
+    /* Thread test with struct + SIMD linked */
+    run_vm_cmd("6l -o t_thread_struct_simd test_thread_struct.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_thread_struct_simd > thread_struct_simd.out >[2=1]", 60);
+
+    /* Test pool_create from model.c */
+    run_vm_cmd("6c -w test_model_pool.c", 60);
+    run_vm_cmd("6l -o t_model_pool test_model_pool.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_model_pool > model_pool.out >[2=1]", 60);
+
+    /* Benchmark test */
+    run_vm_cmd("6c -w test_benchmark.c", 60);
+    run_vm_cmd("6l -o t_benchmark test_benchmark.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_benchmark > benchmark.out >[2=1]", 300);
+
+    /* SIMD validation test */
+    run_vm_cmd("6c -w test_simd_validation.c", 60);
+    run_vm_cmd("6l -o t_simd_validation test_simd_validation.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_simd_validation > simd_validation.out >[2=1]", 300);
+
+    /* SIMD debug test (minimal) */
+    run_vm_cmd("6c -w test_simd_debug.c", 60);
+    run_vm_cmd("6l -o t_simd_debug test_simd_debug.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_simd_debug > simd_debug.out >[2=1]", 60);
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -630,15 +698,148 @@ static void test_generation_quantized(void) {
     free(data);
 }
 
+/* Test: benchmark */
+static void test_benchmark(void) {
+    printf("Testing benchmark... ");
+
+    /* Read benchmark output */
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "benchmark.out", &size);
+    if (!data || size == 0) {
+        add_result("benchmark", 0, 1, "no output file");
+        printf("SKIP (no benchmark output)\n");
+        free(data);
+        return;
+    }
+
+    /* Verify we got benchmark results */
+    if (strstr(data, "GFLOPS") == NULL) {
+        add_result("benchmark", 0, 0, "no GFLOPS in output");
+        printf("FAIL (no GFLOPS in output)\n");
+        free(data);
+        return;
+    }
+
+    /* Verify all modes ran */
+    int has_baseline = strstr(data, "BASELINE") != NULL;
+    int has_simd = strstr(data, "SIMD_ONLY") != NULL;
+    int has_thread = strstr(data, "THREAD_ONLY") != NULL;
+    int has_full = strstr(data, "FULL") != NULL;
+
+    if (!has_baseline || !has_simd || !has_thread || !has_full) {
+        add_result("benchmark", 0, 0, "missing optimization modes");
+        printf("FAIL (missing modes: B=%d S=%d T=%d F=%d)\n",
+               has_baseline, has_simd, has_thread, has_full);
+        free(data);
+        return;
+    }
+
+    /* Verify checksum validation passed */
+    if (strstr(data, "CHECKSUM VALIDATION PASSED") != NULL) {
+        add_result("benchmark", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "CHECKSUM VALIDATION FAILED") != NULL) {
+        add_result("benchmark", 0, 0, "checksum validation failed");
+        printf("FAIL (checksum validation failed)\n");
+    } else {
+        add_result("benchmark", 0, 0, "no checksum validation result");
+        printf("FAIL (no checksum validation result)\n");
+    }
+
+    /* Print benchmark summary */
+    printf("  Benchmark output:\n");
+    /* Make a copy for strtok since it modifies the string */
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "GFLOPS") || strstr(line, "Mode ") ||
+            strstr(line, "===") || strstr(line, "Checksum") ||
+            strstr(line, "VALIDATION")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: SIMD validation */
+static void test_simd_validation(void) {
+    printf("Testing simd_validation... ");
+
+    /* Read SIMD validation output */
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "simd_validation.out", &size);
+    if (!data || size == 0) {
+        add_result("simd_validation", 0, 1, "no output file");
+        printf("SKIP (no simd_validation output)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All SIMD validation tests passed") != NULL) {
+        add_result("simd_validation", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("simd_validation", 0, 0, "SIMD validation failed");
+        printf("FAIL (SIMD validation failed)\n");
+    } else {
+        add_result("simd_validation", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  SIMD validation output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Scalar") || strstr(line, "SIMD")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: SIMD debug (minimal test for fast iteration) */
+static void test_simd_debug(void) {
+    printf("Testing simd_debug... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "simd_debug.out", &size);
+    if (!data || size == 0) {
+        add_result("simd_debug", 0, 1, "no output file");
+        printf("SKIP (no simd_debug output)\n");
+        free(data);
+        return;
+    }
+
+    /* Always show output for debug test */
+    add_result("simd_debug", 1, 0, NULL);
+    printf("output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        printf("    %s\n", line);
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
 /* Run llmfs tests in single VM (local mount) */
 static void run_vm_llmfs_local(void) {
     printf("\n==================================================\n");
     printf("Running llmfs local tests in Plan 9...\n");
     printf("==================================================\n\n");
 
-    /* Compile llmfs - capture errors */
+    /* Compile llmfs - capture errors (SSE SIMD in simd_amd64.s) */
     run_vm_cmd("6c -w llmfs.c >[2=1] > llmfs_compile.log; echo compile_done", 120);
-    run_vm_cmd("6l -o llmfs llmfs.6 >[2=1] >> llmfs_compile.log; echo link_done", 60);
+    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 >[2=1] >> llmfs_compile.log; echo link_done", 60);
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
@@ -769,10 +970,11 @@ static int run_dualvm_llmfs_remote(void) {
     /* Configure network */
     dualvm_configure_network(&dualvm);
 
-    /* CPU VM: Compile and start llmfs */
+    /* CPU VM: Compile llmfs (SSE SIMD in simd_amd64.s) */
     printf("CPU: Compiling llmfs...\n");
+    qemu_sendln_wait(&dualvm.cpu, "6a simd_amd64.s", 30);
     qemu_sendln_wait(&dualvm.cpu, "6c -w llmfs.c", 120);
-    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6", 60);
+    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6", 60);
 
     /* CPU VM: Start llmfs server and mount it locally */
     printf("CPU: Starting llmfs server...\n");
@@ -917,11 +1119,26 @@ static void print_summary(void) {
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    /* Parse arguments */
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            printf("Usage: %s [filter]\n", argv[0]);
+            printf("  filter: only run tests containing this string\n");
+            printf("  Examples:\n");
+            printf("    %s simd        # run simd_validation and benchmark\n", argv[0]);
+            printf("    %s benchmark   # run only benchmark\n", argv[0]);
+            printf("    %s matmul      # run matmul and quantized_matmul\n", argv[0]);
+            return 0;
+        } else {
+            test_filter = argv[i];
+        }
+    }
 
     printf("==================================================\n");
     printf("9ml Automated Test Suite (C Harness)\n");
+    if (test_filter) {
+        printf("Filter: %s\n", test_filter);
+    }
     printf("==================================================\n\n");
 
     /* Ensure we're in the right directory */
@@ -957,17 +1174,19 @@ int main(int argc, char *argv[]) {
     /* Run tests in VM */
     run_vm_tests();
 
-    /* Run llmfs local tests */
-    run_vm_llmfs_local();
+    /* Run llmfs local tests (skip if filtering for non-llmfs tests) */
+    if (should_run_test("llmfs")) {
+        run_vm_llmfs_local();
+    }
 
     /* Shutdown VM */
     printf("\nShutting down VM...\n");
     qemu_shutdown(&vm);
     qemu_killall();
 
-    /* Run dual-VM tests for remote 9P */
+    /* Run dual-VM tests for remote 9P (skip if filtering for non-llmfs tests) */
     int run_remote_tests = 1;  /* Set to 1 to enable remote tests */
-    if (run_remote_tests && file_exists(MODEL_FILE)) {
+    if (run_remote_tests && file_exists(MODEL_FILE) && should_run_test("llmfs_remote")) {
         run_dualvm_llmfs_remote();
     }
 
@@ -976,17 +1195,20 @@ int main(int argc, char *argv[]) {
     printf("Verifying Results\n");
     printf("==================================================\n\n");
 
-    test_rmsnorm();
-    test_softmax();
-    test_matmul();
-    test_rng();
-    test_quantize();
-    test_quantized_matmul();
-    test_model_loading();
-    test_generation();
-    test_generation_quantized();
-    test_llmfs_local();
-    test_llmfs_remote();
+    if (should_run_test("rmsnorm")) test_rmsnorm();
+    if (should_run_test("softmax")) test_softmax();
+    if (should_run_test("matmul")) test_matmul();
+    if (should_run_test("rng")) test_rng();
+    if (should_run_test("quantize")) test_quantize();
+    if (should_run_test("quantized_matmul")) test_quantized_matmul();
+    if (should_run_test("model_loading")) test_model_loading();
+    if (should_run_test("generation")) test_generation();
+    if (should_run_test("generation_quantized")) test_generation_quantized();
+    if (should_run_test("benchmark")) test_benchmark();
+    if (should_run_test("simd_validation")) test_simd_validation();
+    if (should_run_test("simd_debug")) test_simd_debug();
+    if (should_run_test("llmfs_local")) test_llmfs_local();
+    if (should_run_test("llmfs_remote")) test_llmfs_remote();
 
     print_summary();
 

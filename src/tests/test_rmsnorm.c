@@ -1,4 +1,5 @@
 /* Test rmsnorm function */
+#define DISABLE_THREADING
 #include "model.c"
 
 void

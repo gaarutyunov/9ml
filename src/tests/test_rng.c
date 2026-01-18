@@ -1,4 +1,5 @@
 /* Test random number generator */
+#define DISABLE_THREADING
 #include "model.c"
 
 void

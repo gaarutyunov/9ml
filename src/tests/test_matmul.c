@@ -1,4 +1,5 @@
 /* Test matmul function */
+#define DISABLE_THREADING
 #include "model.c"
 
 void

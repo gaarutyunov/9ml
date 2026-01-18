@@ -2,23 +2,35 @@
 
 TARG=run runq export llmfs
 
+# SIMD assembly files for amd64
+SIMD_ASM=simd_amd64.$O simdq_amd64.$O
+
 all:V: $TARG
 
-run: run.$O
+# run and runq need SIMD assembly linked
+run: run.$O $SIMD_ASM
 	$LD -o $target $prereq
 
-runq: runq.$O
+runq: runq.$O $SIMD_ASM
 	$LD -o $target $prereq
 
 export: export.$O
 	$LD -o $target $prereq
 
 # llmfs requires lib9p and libthread
-llmfs: llmfs.$O
+llmfs: llmfs.$O $SIMD_ASM
 	$LD -o $target $prereq
 
+# C source compilation
 %.$O: %.c
 	$CC $CFLAGS $stem.c
+
+# Assembly compilation (Plan 9 assembler)
+simd_amd64.$O: simd_amd64.s
+	$AS simd_amd64.s
+
+simdq_amd64.$O: simdq_amd64.s
+	$AS simdq_amd64.s
 
 clean:V:
 	rm -f *.$O $TARG

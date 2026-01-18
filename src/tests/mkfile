@@ -1,5 +1,6 @@
 </$objtype/mkfile
 
+# Standard tests (no assembly dependencies)
 TESTS=\
 	test_rmsnorm\
 	test_softmax\
@@ -9,13 +10,52 @@ TESTS=\
 	test_quantized_matmul\
 	test_model_loading\
 
-all:V: $TESTS
+# Benchmark test (requires SIMD assembly)
+BENCH=test_benchmark
 
+# SIMD validation test (requires SIMD assembly)
+SIMD_VALIDATION=test_simd_validation
+
+# SIMD debug test (minimal, fast)
+SIMD_DEBUG=test_simd_debug
+
+# Thread test with SIMD linked (for debugging)
+THREAD_SIMD=test_thread_with_simd
+
+# SIMD assembly from parent directory
+SIMD_ASM=../simd_amd64.$O ../simdq_amd64.$O
+
+all:V: $TESTS $BENCH $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD
+
+# Standard tests use default rules
 %: %.$O
 	$LD -o $target $prereq
 
 %.$O: %.c
 	$CC $CFLAGS $stem.c
 
+# Benchmark needs assembly linked
+$BENCH: $BENCH.$O $SIMD_ASM
+	$LD -o $target $prereq
+
+# SIMD validation test needs assembly linked
+$SIMD_VALIDATION: $SIMD_VALIDATION.$O $SIMD_ASM
+	$LD -o $target $prereq
+
+# SIMD debug test needs assembly linked
+$SIMD_DEBUG: $SIMD_DEBUG.$O $SIMD_ASM
+	$LD -o $target $prereq
+
+# Thread test with SIMD linked
+$THREAD_SIMD: $THREAD_SIMD.$O $SIMD_ASM
+	$LD -o $target $prereq
+
+# Assembly compilation (if not already built in parent)
+../simd_amd64.$O: ../simd_amd64.s
+	$AS ../simd_amd64.s
+
+../simdq_amd64.$O: ../simdq_amd64.s
+	$AS ../simdq_amd64.s
+
 clean:V:
-	rm -f *.$O $TESTS *.out
+	rm -f *.$O $TESTS $BENCH $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD *.out

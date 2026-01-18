@@ -1,4 +1,5 @@
 /* Test quantize/dequantize roundtrip */
+#define DISABLE_THREADING
 #include "modelq.c"
 
 void

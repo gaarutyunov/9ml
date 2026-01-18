@@ -1,4 +1,5 @@
 /* Test softmax function */
+#define DISABLE_THREADING
 #include "model.c"
 
 void

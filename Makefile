@@ -15,7 +15,7 @@ test/harness: test/*.c test/*.h
 	$(CC) $(CFLAGS) -o $@ test/*.c $(LDFLAGS)
 
 test: test/harness export stories15M_q80.bin
-	cd test && ./harness
+	cd test && ./harness $(FILTER)
 
 stories15M_q80.bin: export stories15M.bin
 	./export quantize stories15M.bin stories15M_q80.bin

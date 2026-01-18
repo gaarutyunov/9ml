@@ -1,8 +1,383 @@
 /* Inference for Llama-2 Transformer model in pure C */
-/* Plan 9 port - Model implementation */
+/* Plan 9 port - Model implementation with SIMD and parallel optimizations */
+/*
+ * Define DISABLE_THREADING before including this file to disable
+ * thread support (for simple tests that don't need parallelism).
+ */
 
 #include <u.h>
 #include <libc.h>
+
+#ifndef DISABLE_THREADING
+#include <thread.h>
+#endif
+
+// ----------------------------------------------------------------------------
+// Optimization configuration
+
+typedef struct {
+    int nthreads;           /* number of threads to use (0 = auto-detect) */
+    int use_simd;           /* whether to use SIMD optimizations */
+} OptConfig;
+
+OptConfig opt_config = {
+    .nthreads = 0,      /* 0 = auto-detect */
+#ifdef DISABLE_THREADING
+    .use_simd = 0,      /* SIMD disabled when threading disabled (no assembly linkage) */
+#else
+    .use_simd = 1,      /* SIMD enabled by default */
+#endif
+};
+
+/* Thread pool for parallel execution */
+typedef struct ThreadPool ThreadPool;
+typedef struct WorkItem WorkItem;
+
+struct WorkItem {
+    void (*fn)(void*);
+    void *arg;
+    WorkItem *next;
+};
+
+#ifndef DISABLE_THREADING
+struct ThreadPool {
+    int nworkers;
+    int active;
+    Channel *work;
+    Channel *done;
+    Channel *shutdown;
+    Channel *ready;     /* workers signal ready before entering main loop */
+};
+#else
+struct ThreadPool {
+    int nworkers;
+    int active;
+};
+#endif
+
+static ThreadPool *global_pool = nil;
+
+/* Detect number of CPUs by reading /dev/sysstat */
+int
+cpu_count(void)
+{
+#ifdef DISABLE_THREADING
+    return 1;
+#else
+    int fd, n, count;
+    char *buf, *p;
+
+    /* Use heap instead of stack to avoid stack overflow in threadmain */
+    buf = malloc(4096);
+    if (buf == nil) {
+        return 1;
+    }
+
+    fd = open("/dev/sysstat", OREAD);
+    if (fd < 0) {
+        free(buf);
+        return 1;
+    }
+
+    n = read(fd, buf, 4095);
+    close(fd);
+
+    if (n <= 0) {
+        free(buf);
+        return 1;
+    }
+    buf[n] = '\0';
+
+    count = 0;
+    for (p = buf; *p; p++) {
+        if (*p == '\n') {
+            count++;
+        }
+    }
+
+    free(buf);
+    return count > 0 ? count : 1;
+#endif
+}
+
+#ifndef DISABLE_THREADING
+/* Worker thread main loop */
+static void
+worker_proc(void *arg)
+{
+    ThreadPool *p = arg;
+    WorkItem *item;
+
+    /* Signal that we're ready */
+    sendp(p->ready, (void*)1);
+
+    for (;;) {
+        item = recvp(p->work);
+        if (item == nil) {
+            /* Acknowledge shutdown and exit */
+            sendp(p->shutdown, (void*)1);
+            break;
+        }
+
+        if (item->fn != nil) {
+            item->fn(item->arg);
+        }
+
+        sendp(p->done, (void*)1);
+        free(item);
+    }
+
+    threadexits(nil);
+}
+
+/* Create a thread pool */
+ThreadPool*
+pool_create(int nworkers)
+{
+    ThreadPool *p;
+    int i;
+
+    if (nworkers <= 0) {
+        nworkers = cpu_count();
+    }
+
+    p = malloc(sizeof(ThreadPool));
+    if (p == nil) {
+        return nil;
+    }
+
+    p->nworkers = nworkers;
+    p->active = 1;
+    p->work = chancreate(sizeof(void*), nworkers * 4);
+    p->done = chancreate(sizeof(void*), nworkers * 4);
+    p->shutdown = chancreate(sizeof(void*), nworkers);
+    p->ready = chancreate(sizeof(void*), nworkers);
+
+    if (p->work == nil || p->done == nil || p->shutdown == nil || p->ready == nil) {
+        if (p->work) chanfree(p->work);
+        if (p->done) chanfree(p->done);
+        if (p->shutdown) chanfree(p->shutdown);
+        if (p->ready) chanfree(p->ready);
+        free(p);
+        return nil;
+    }
+
+    /* Create worker threads with 8KB stack */
+    for (i = 0; i < nworkers; i++) {
+        proccreate(worker_proc, p, 8192);
+    }
+
+    /* Wait for all workers to be ready before returning */
+    for (i = 0; i < nworkers; i++) {
+        recvp(p->ready);
+    }
+
+    return p;
+}
+
+/* Destroy a thread pool */
+void
+pool_destroy(ThreadPool *p)
+{
+    int i;
+
+    if (p == nil) {
+        return;
+    }
+
+    p->active = 0;
+
+    /* Send shutdown signals to all workers */
+    for (i = 0; i < p->nworkers; i++) {
+        sendp(p->work, nil);
+    }
+
+    /* Wait for all workers to acknowledge shutdown */
+    for (i = 0; i < p->nworkers; i++) {
+        recvp(p->shutdown);
+    }
+
+    /* Now safe to free channels */
+    chanfree(p->work);
+    chanfree(p->done);
+    chanfree(p->shutdown);
+    chanfree(p->ready);
+    free(p);
+}
+
+/* Submit work to the thread pool */
+void
+pool_submit(ThreadPool *p, void (*fn)(void*), void *arg)
+{
+    WorkItem *item;
+
+    if (p == nil || !p->active) {
+        if (fn != nil) {
+            fn(arg);
+        }
+        return;
+    }
+
+    item = malloc(sizeof(WorkItem));
+    if (item == nil) {
+        if (fn != nil) {
+            fn(arg);
+        }
+        return;
+    }
+
+    item->fn = fn;
+    item->arg = arg;
+    item->next = nil;
+
+    sendp(p->work, item);
+}
+
+/* Wait for njobs to complete */
+void
+pool_wait(ThreadPool *p, int njobs)
+{
+    int i;
+
+    if (p == nil) {
+        return;
+    }
+
+    for (i = 0; i < njobs; i++) {
+        recvp(p->done);
+    }
+}
+
+#else /* DISABLE_THREADING - stub implementations */
+
+ThreadPool* pool_create(int nworkers) { USED(nworkers); return nil; }
+void pool_destroy(ThreadPool *p) { USED(p); }
+void pool_submit(ThreadPool *p, void (*fn)(void*), void *arg) { USED(p); if (fn) fn(arg); }
+void pool_wait(ThreadPool *p, int njobs) { USED(p); USED(njobs); }
+
+#endif /* DISABLE_THREADING */
+
+/* Initialize optimization subsystem */
+void
+opt_init(void)
+{
+    if (opt_config.nthreads == 0) {
+        opt_config.nthreads = cpu_count();
+    }
+
+    /* Create thread pool if using more than 1 thread */
+    if (opt_config.nthreads > 1 && global_pool == nil) {
+        global_pool = pool_create(opt_config.nthreads);
+    }
+}
+
+/* Cleanup optimization subsystem */
+void
+opt_cleanup(void)
+{
+    if (global_pool != nil) {
+        pool_destroy(global_pool);
+        global_pool = nil;
+    }
+}
+
+// ----------------------------------------------------------------------------
+// SIMD function declarations
+// Note: Plan 9 assembly SIMD support is limited. We provide C fallbacks
+// that can be replaced with assembly when available.
+
+#ifndef DISABLE_THREADING
+// Forward declare scalar versions (defined below)
+void matmul_scalar(float* xout, float* x, float* w, int n, int d);
+void rmsnorm_scalar(float* o, float* x, float* weight, int size);
+
+// ----------------------------------------------------------------------------
+// SIMD functions - implemented in simd_amd64.s assembly
+// Uses SSE packed instructions for 4x float parallelism.
+//
+// Plan 9 amd64 calling convention:
+// - First integer/pointer arg is in BP (RARG)
+// - Subsequent args are on stack at +8(FP), +16(FP), etc.
+
+/* Assembly SIMD functions - defined in simd_amd64.s */
+extern void matmul_simd(float *xout, float *x, float *w, int n, int d);
+extern float dot_product_simd(float *a, float *b, int n);
+extern void rmsnorm_simd(float *o, float *x, float *weight, int size);
+extern void vec_add_simd(float *o, float *a, float *b, int n);
+extern void vec_scale_simd(float *o, float *x, float scalar, int n);
+
+/*
+ * softmax_simd - Optimized softmax (C implementation)
+ * x[i] = exp(x[i] - max) / sum(exp(x - max))
+ * Note: Kept in C because it requires exp() from the math library.
+ * Uses 4x unrolled loops for max, exp, and normalize passes.
+ */
+void softmax_simd(float *x, int size) {
+    int i;
+
+    /* Find max value (4x unrolled) */
+    float max0 = x[0];
+    float max1 = size > 1 ? x[1] : x[0];
+    float max2 = size > 2 ? x[2] : x[0];
+    float max3 = size > 3 ? x[3] : x[0];
+
+    for (i = 4; i + 3 < size; i += 4) {
+        if (x[i]     > max0) max0 = x[i];
+        if (x[i + 1] > max1) max1 = x[i + 1];
+        if (x[i + 2] > max2) max2 = x[i + 2];
+        if (x[i + 3] > max3) max3 = x[i + 3];
+    }
+
+    float max_val = max0;
+    if (max1 > max_val) max_val = max1;
+    if (max2 > max_val) max_val = max2;
+    if (max3 > max_val) max_val = max3;
+
+    /* Handle remaining elements for max */
+    for (; i < size; i++) {
+        if (x[i] > max_val) max_val = x[i];
+    }
+
+    /* Exp and sum (4x unrolled) */
+    float sum0 = 0.0f;
+    float sum1 = 0.0f;
+    float sum2 = 0.0f;
+    float sum3 = 0.0f;
+
+    for (i = 0; i + 3 < size; i += 4) {
+        x[i]     = exp(x[i]     - max_val);
+        x[i + 1] = exp(x[i + 1] - max_val);
+        x[i + 2] = exp(x[i + 2] - max_val);
+        x[i + 3] = exp(x[i + 3] - max_val);
+        sum0 += x[i];
+        sum1 += x[i + 1];
+        sum2 += x[i + 2];
+        sum3 += x[i + 3];
+    }
+
+    float sum = sum0 + sum1 + sum2 + sum3;
+
+    /* Handle remaining elements for exp */
+    for (; i < size; i++) {
+        x[i] = exp(x[i] - max_val);
+        sum += x[i];
+    }
+
+    /* Normalize (4x unrolled) */
+    float inv_sum = 1.0f / sum;
+    for (i = 0; i + 3 < size; i += 4) {
+        x[i]     *= inv_sum;
+        x[i + 1] *= inv_sum;
+        x[i + 2] *= inv_sum;
+        x[i + 3] *= inv_sum;
+    }
+
+    /* Handle remaining elements for normalize */
+    for (; i < size; i++) {
+        x[i] *= inv_sum;
+    }
+}
+#endif
 
 // ----------------------------------------------------------------------------
 // Transformer model
@@ -218,7 +593,8 @@ void free_transformer(Transformer* t) {
 // ----------------------------------------------------------------------------
 // neural net blocks; the dynamics of the Transformer
 
-void rmsnorm(float* o, float* x, float* weight, int size) {
+/* Scalar C implementation of rmsnorm */
+void rmsnorm_scalar(float* o, float* x, float* weight, int size) {
     // calculate sum of squares
     float ss = 0.0f;
     for (int j = 0; j < size; j++) {
@@ -231,6 +607,19 @@ void rmsnorm(float* o, float* x, float* weight, int size) {
     for (int j = 0; j < size; j++) {
         o[j] = weight[j] * (ss * x[j]);
     }
+}
+
+/* Dispatcher for rmsnorm - uses SIMD or scalar based on config */
+void rmsnorm(float* o, float* x, float* weight, int size) {
+#ifndef DISABLE_THREADING
+    if (opt_config.use_simd) {
+        rmsnorm_simd(o, x, weight, size);
+    } else {
+        rmsnorm_scalar(o, x, weight, size);
+    }
+#else
+    rmsnorm_scalar(o, x, weight, size);
+#endif
 }
 
 void softmax(float* x, int size) {
@@ -253,10 +642,9 @@ void softmax(float* x, int size) {
     }
 }
 
-void matmul(float* xout, float* x, float* w, int n, int d) {
+/* Scalar C implementation of matmul */
+void matmul_scalar(float* xout, float* x, float* w, int n, int d) {
     // W (d,n) @ x (n,) -> xout (d,)
-    // by far the most amount of time is spent inside this little function
-    // Plan 9: no OpenMP, single-threaded
     for (int i = 0; i < d; i++) {
         float val = 0.0f;
         for (int j = 0; j < n; j++) {
@@ -264,6 +652,176 @@ void matmul(float* xout, float* x, float* w, int n, int d) {
         }
         xout[i] = val;
     }
+}
+
+/* Dispatcher for matmul - uses SIMD or scalar based on config */
+void matmul(float* xout, float* x, float* w, int n, int d) {
+#ifndef DISABLE_THREADING
+    if (opt_config.use_simd) {
+        matmul_simd(xout, x, w, n, d);
+    } else {
+        matmul_scalar(xout, x, w, n, d);
+    }
+#else
+    matmul_scalar(xout, x, w, n, d);
+#endif
+}
+
+// ----------------------------------------------------------------------------
+// Parallel attention
+
+/* Context for parallel attention head computation */
+typedef struct {
+    int h;              /* head index */
+    int head_size;
+    int pos;
+    int seq_len;
+    int kv_dim;
+    int kv_mul;
+    int loff;
+    float *q;
+    float *att;
+    float *xb;
+    float *key_cache;
+    float *value_cache;
+} HeadContext;
+
+/* Worker function for single attention head */
+static void
+attention_head_worker(void *arg)
+{
+    HeadContext *ctx = arg;
+    int h = ctx->h;
+    int head_size = ctx->head_size;
+    int pos = ctx->pos;
+    int seq_len = ctx->seq_len;
+    int kv_dim = ctx->kv_dim;
+    int kv_mul = ctx->kv_mul;
+    int loff = ctx->loff;
+
+    /* Get pointers for this head */
+    float *q = ctx->q + h * head_size;
+    float *att = ctx->att + h * seq_len;
+    float *xb = ctx->xb + h * head_size;
+
+    int t, i;
+    float score, a;
+    float *k, *v;
+
+    /* Compute attention scores */
+    for (t = 0; t <= pos; t++) {
+        k = ctx->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+        score = 0.0f;
+        for (i = 0; i < head_size; i++) {
+            score += q[i] * k[i];
+        }
+        att[t] = score / sqrt((float)head_size);
+    }
+
+    /* Softmax the scores */
+    softmax(att, pos + 1);
+
+    /* Weighted sum of values */
+    memset(xb, 0, head_size * sizeof(float));
+    for (t = 0; t <= pos; t++) {
+        v = ctx->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+        a = att[t];
+        for (i = 0; i < head_size; i++) {
+            xb[i] += a * v[i];
+        }
+    }
+}
+
+/* Parallel multihead attention */
+static void
+parallel_attention(RunState *s, Config *p, int pos, int loff, int kv_dim, int kv_mul, int head_size) {
+    int h;
+    HeadContext *contexts;
+
+    /* If single-threaded or no pool, use sequential */
+    if (opt_config.nthreads <= 1 || global_pool == nil) {
+        for (h = 0; h < p->n_heads; h++) {
+            float* q = s->q + h * head_size;
+            float* att = s->att + h * p->seq_len;
+
+            for (int t = 0; t <= pos; t++) {
+                float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                float score = 0.0f;
+                for (int i = 0; i < head_size; i++) {
+                    score += q[i] * k[i];
+                }
+                att[t] = score / sqrt(head_size);
+            }
+
+            softmax(att, pos + 1);
+
+            float* xb = s->xb + h * head_size;
+            memset(xb, 0, head_size * sizeof(float));
+            for (int t = 0; t <= pos; t++) {
+                float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                float a = att[t];
+                for (int i = 0; i < head_size; i++) {
+                    xb[i] += a * v[i];
+                }
+            }
+        }
+        return;
+    }
+
+    /* Allocate contexts for all heads */
+    contexts = malloc(p->n_heads * sizeof(HeadContext));
+    if (contexts == nil) {
+        /* Fallback to sequential */
+        for (h = 0; h < p->n_heads; h++) {
+            float* q = s->q + h * head_size;
+            float* att = s->att + h * p->seq_len;
+
+            for (int t = 0; t <= pos; t++) {
+                float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                float score = 0.0f;
+                for (int i = 0; i < head_size; i++) {
+                    score += q[i] * k[i];
+                }
+                att[t] = score / sqrt(head_size);
+            }
+
+            softmax(att, pos + 1);
+
+            float* xb = s->xb + h * head_size;
+            memset(xb, 0, head_size * sizeof(float));
+            for (int t = 0; t <= pos; t++) {
+                float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
+                float a = att[t];
+                for (int i = 0; i < head_size; i++) {
+                    xb[i] += a * v[i];
+                }
+            }
+        }
+        return;
+    }
+
+    /* Submit all heads to thread pool */
+    for (h = 0; h < p->n_heads; h++) {
+        contexts[h].h = h;
+        contexts[h].head_size = head_size;
+        contexts[h].pos = pos;
+        contexts[h].seq_len = p->seq_len;
+        contexts[h].kv_dim = kv_dim;
+        contexts[h].kv_mul = kv_mul;
+        contexts[h].loff = loff;
+        contexts[h].q = s->q;
+        contexts[h].att = s->att;
+        contexts[h].xb = s->xb;
+        contexts[h].key_cache = s->key_cache;
+        contexts[h].value_cache = s->value_cache;
+
+        pool_submit(global_pool, attention_head_worker, &contexts[h]);
+    }
+
+    /* Wait for all heads to complete */
+    pool_wait(global_pool, p->n_heads);
+
+    free(contexts);
 }
 
 float* forward(Transformer* transformer, int token, int pos) {
@@ -316,44 +874,8 @@ float* forward(Transformer* transformer, int token, int pos) {
             }
         }
 
-        // multihead attention. iterate over all heads
-        // Plan 9: no OpenMP, single-threaded
-        for (int h = 0; h < p->n_heads; h++) {
-            // get the query vector for this head
-            float* q = s->q + h * head_size;
-            // attention scores for this head
-            float* att = s->att + h * p->seq_len;
-            // iterate over all timesteps, including the current one
-            for (int t = 0; t <= pos; t++) {
-                // get the key vector for this head and at this timestep
-                float* k = s->key_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // calculate the attention score as the dot product of q and k
-                float score = 0.0f;
-                for (int i = 0; i < head_size; i++) {
-                    score += q[i] * k[i];
-                }
-                score /= sqrt(head_size);
-                // save the score to the attention buffer
-                att[t] = score;
-            }
-
-            // softmax the scores to get attention weights, from 0..pos inclusively
-            softmax(att, pos + 1);
-
-            // weighted sum of the values, store back into xb
-            float* xb = s->xb + h * head_size;
-            memset(xb, 0, head_size * sizeof(float));
-            for (int t = 0; t <= pos; t++) {
-                // get the value vector for this head and at this timestep
-                float* v = s->value_cache + loff + t * kv_dim + (h / kv_mul) * head_size;
-                // get the attention weight for this timestep
-                float a = att[t];
-                // accumulate the weighted value into xb
-                for (int i = 0; i < head_size; i++) {
-                    xb[i] += a * v[i];
-                }
-            }
-        }
+        // multihead attention - use parallel version
+        parallel_attention(s, p, pos, loff, kv_dim, kv_mul, head_size);
 
         // final matmul to get the output of the attention
         matmul(s->xb2, s->xb, w->wo + l*dim*dim, dim, dim);

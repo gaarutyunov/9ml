@@ -1,4 +1,5 @@
 /* Test model config and weights loading */
+#define DISABLE_THREADING
 #include "model.c"
 
 void

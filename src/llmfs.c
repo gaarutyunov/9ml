@@ -14,12 +14,11 @@
  *     status    - current status (idle, generating N/M, done tok/s, error)
  */
 
-/* Include model implementation first (it includes u.h and libc.h) */
+/* Include model implementation first (it includes u.h, libc.h, and thread.h) */
 #include "model.c"
 
 /* Additional headers for 9P server */
 #include <fcall.h>
-#include <thread.h>
 #include <9p.h>
 
 /* Maximum sessions */

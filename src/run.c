@@ -1,5 +1,5 @@
 /* Inference for Llama-2 Transformer model in pure C */
-/* Plan 9 port - CLI */
+/* Plan 9 port - CLI with SIMD and parallel optimization support */
 
 #include "model.c"
 
@@ -18,11 +18,18 @@ void error_usage(void) {
     fprint(2, "  -z <string> optional path to custom tokenizer\n");
     fprint(2, "  -m <string> mode: generate|chat, default: generate\n");
     fprint(2, "  -y <string> (optional) system prompt in chat mode\n");
+    fprint(2, "  -j <int>    number of threads (default: auto-detect, 1 = single-threaded)\n");
+    fprint(2, "  --no-simd   disable SIMD optimizations (use scalar code)\n");
     exits("usage");
 }
 
+/* Check if argument matches a long option */
+int match_long_opt(char *arg, char *opt) {
+    return strcmp(arg, opt) == 0;
+}
+
 void
-main(int argc, char *argv[]) {
+threadmain(int argc, char *argv[]) {
 
     // default parameters
     char *checkpoint_path = nil;
@@ -37,18 +44,29 @@ main(int argc, char *argv[]) {
 
     // parse args
     if (argc >= 2) { checkpoint_path = argv[1]; } else { error_usage(); }
-    for (int i = 2; i < argc; i+=2) {
-        if (i + 1 >= argc) { error_usage(); }
+    for (int i = 2; i < argc; i++) {
+        // Handle long options first
+        if (match_long_opt(argv[i], "--no-simd")) {
+            opt_config.use_simd = 0;
+            continue;
+        }
+
+        // Short options require a value
+        if (i + 1 >= argc && argv[i][0] == '-' && strlen(argv[i]) == 2) {
+            error_usage();
+        }
         if (argv[i][0] != '-') { error_usage(); }
         if (strlen(argv[i]) != 2) { error_usage(); }
-        if (argv[i][1] == 't') { temperature = atof(argv[i + 1]); }
-        else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); }
-        else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); }
-        else if (argv[i][1] == 'n') { steps = atoi(argv[i + 1]); }
-        else if (argv[i][1] == 'i') { prompt = argv[i + 1]; }
-        else if (argv[i][1] == 'z') { tokenizer_path = argv[i + 1]; }
-        else if (argv[i][1] == 'm') { mode = argv[i + 1]; }
-        else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; }
+
+        if (argv[i][1] == 't') { temperature = atof(argv[i + 1]); i++; }
+        else if (argv[i][1] == 'p') { topp = atof(argv[i + 1]); i++; }
+        else if (argv[i][1] == 's') { rng_seed = atoi(argv[i + 1]); i++; }
+        else if (argv[i][1] == 'n') { steps = atoi(argv[i + 1]); i++; }
+        else if (argv[i][1] == 'i') { prompt = argv[i + 1]; i++; }
+        else if (argv[i][1] == 'z') { tokenizer_path = argv[i + 1]; i++; }
+        else if (argv[i][1] == 'm') { mode = argv[i + 1]; i++; }
+        else if (argv[i][1] == 'y') { system_prompt = argv[i + 1]; i++; }
+        else if (argv[i][1] == 'j') { opt_config.nthreads = atoi(argv[i + 1]); i++; }
         else { error_usage(); }
     }
 
@@ -57,6 +75,14 @@ main(int argc, char *argv[]) {
     if (temperature < 0.0) temperature = 0.0;
     if (topp < 0.0 || 1.0 < topp) topp = 0.9;
     if (steps < 0) steps = 0;
+
+    // Initialize optimization subsystem
+    opt_init();
+
+    // Print optimization settings
+    fprint(2, "Optimization: SIMD=%s, threads=%d\n",
+           opt_config.use_simd ? "on" : "off",
+           opt_config.nthreads);
 
     // build the Transformer
     Transformer transformer;
@@ -85,5 +111,6 @@ main(int argc, char *argv[]) {
     free_sampler(&sampler);
     free_tokenizer(&tokenizer);
     free_transformer(&transformer);
-    exits(0);
+    opt_cleanup();
+    threadexits(0);
 }

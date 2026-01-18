@@ -1,4 +1,5 @@
 /* Test quantized matmul */
+#define DISABLE_THREADING
 #include "modelq.c"
 
 void

@@ -73,6 +73,7 @@ int qemu_start(QemuVM *vm, const char *disk_image, const char *shared_image) {
 
         execlp("qemu-system-x86_64", "qemu-system-x86_64",
                "-m", "512",
+               "-smp", "4",
                "-cpu", "host",
                "-accel", "kvm",
                "-drive", disk_arg,
@@ -149,6 +150,7 @@ int qemu_start_with_net(QemuVM *vm, const char *disk_image, const char *shared_i
 
         execlp("qemu-system-x86_64", "qemu-system-x86_64",
                "-m", mem,
+               "-smp", "4",
                "-cpu", "host",
                "-accel", "kvm",
                "-drive", disk_arg,
