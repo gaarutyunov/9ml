@@ -455,4 +455,489 @@ vscale_remainder:
 vscale_done:
 	RET
 
-// NOTE: softmax_simd is not implemented - use C scalar version
+// ============================================================================
+// Softmax SIMD Helper Functions
+// ============================================================================
+
+// softmax_max_simd(x, size) -> float
+// Returns max value in array x[0:size]
+//
+// Parameters (Plan 9 amd64 stack layout):
+//   x:    BP (RARG)  - input array
+//   size: 16(SP)     - array length
+// Returns: float in X0 (and at ret+24(SP))
+TEXT softmax_max_simd(SB), $0
+	MOVL	16(SP), CX		// CX = size
+	TESTL	CX, CX
+	JLE	smax_done_zero		// Return 0 if size <= 0
+
+	// Initialize max with first element
+	MOVSS	(BP), X0		// X0 = x[0] (max so far)
+	MOVL	$1, AX			// AX = i = 1
+
+	// If size <= 4, use scalar loop
+	MOVL	CX, DX
+	SUBL	$4, DX
+	TESTL	DX, DX
+	JLE	smax_remainder
+
+	// Broadcast X0 to all 4 lanes
+	SHUFPS	$0x00, X0, X0		// X0 = [max, max, max, max]
+
+	// Main loop: process 4 elements at a time
+smax_loop4:
+	MOVL	CX, DX
+	SUBL	$3, DX			// DX = size - 3
+	MOVL	DX, R8
+	SUBL	AX, R8			// R8 = (size - 3) - i
+	TESTL	R8, R8
+	JLE	smax_reduce		// exit if (size - 3) - i <= 0
+
+	MOVUPS	(BP)(AX*4), X1		// X1 = x[i:i+4]
+	MAXPS	X1, X0			// X0 = max(X0, X1) elementwise
+
+	ADDL	$4, AX
+	JMP	smax_loop4
+
+smax_reduce:
+	// Reduce 4 maxes to 1: horizontal max
+	MOVAPS	X0, X1
+	SHUFPS	$0xB1, X1, X1		// X1 = [X0[1], X0[0], X0[3], X0[2]]
+	MAXPS	X1, X0			// X0 = [max01, max01, max23, max23]
+	MOVAPS	X0, X1
+	SHUFPS	$0x0A, X1, X1		// X1 = [X0[2], X0[2], X0[0], X0[0]]
+	MAXSS	X1, X0			// X0[0] = final max
+
+smax_remainder:
+	// Handle remaining elements with scalar loop
+	MOVL	CX, R8
+	SUBL	AX, R8			// R8 = size - i
+	TESTL	R8, R8
+	JLE	smax_done
+
+	MOVSS	(BP)(AX*4), X1
+	MAXSS	X1, X0
+
+	INCL	AX
+	JMP	smax_remainder
+
+smax_done:
+	MOVSS	X0, 24(SP)		// Store return value
+	RET
+
+smax_done_zero:
+	XORPS	X0, X0			// Return 0.0
+	MOVSS	X0, 24(SP)
+	RET
+
+// softmax_sum_simd(x, size) -> float
+// Returns sum of all values in array x[0:size]
+//
+// Parameters:
+//   x:    BP (RARG)  - input array
+//   size: 16(SP)     - array length
+// Returns: float in X0 (and at ret+24(SP))
+TEXT softmax_sum_simd(SB), $0
+	MOVL	16(SP), CX		// CX = size
+	TESTL	CX, CX
+	JLE	ssum_done_zero		// Return 0 if size <= 0
+
+	XORPS	X0, X0			// X0 = accumulator
+	XORPS	X1, X1			// X1 = accumulator 2
+	XORL	AX, AX			// AX = i = 0
+
+	// Main loop: process 8 elements at a time
+ssum_loop8:
+	MOVL	CX, DX
+	SUBL	$7, DX			// DX = size - 7
+	MOVL	DX, R8
+	SUBL	AX, R8			// R8 = (size - 7) - i
+	TESTL	R8, R8
+	JLE	ssum_loop4		// exit if (size - 7) - i <= 0
+
+	MOVUPS	(BP)(AX*4), X2
+	ADDPS	X2, X0
+	MOVUPS	16(BP)(AX*4), X2
+	ADDPS	X2, X1
+
+	ADDL	$8, AX
+	JMP	ssum_loop8
+
+ssum_loop4:
+	MOVL	CX, DX
+	SUBL	$3, DX			// DX = size - 3
+	MOVL	DX, R8
+	SUBL	AX, R8			// R8 = (size - 3) - i
+	TESTL	R8, R8
+	JLE	ssum_reduce		// exit if (size - 3) - i <= 0
+
+	MOVUPS	(BP)(AX*4), X2
+	ADDPS	X2, X0
+
+	ADDL	$4, AX
+	JMP	ssum_loop4
+
+ssum_reduce:
+	// Combine accumulators
+	ADDPS	X1, X0
+
+	// Horizontal sum
+	MOVAPS	X0, X1
+	SHUFPS	$0xB1, X1, X1
+	ADDPS	X1, X0
+	MOVAPS	X0, X1
+	SHUFPS	$0x0A, X1, X1
+	ADDSS	X1, X0
+
+	// Handle remaining elements
+ssum_remainder:
+	MOVL	CX, R8
+	SUBL	AX, R8			// R8 = size - i
+	TESTL	R8, R8
+	JLE	ssum_done
+
+	MOVSS	(BP)(AX*4), X1
+	ADDSS	X1, X0
+
+	INCL	AX
+	JMP	ssum_remainder
+
+ssum_done:
+	MOVSS	X0, 24(SP)		// Store return value
+	RET
+
+ssum_done_zero:
+	XORPS	X0, X0
+	MOVSS	X0, 24(SP)
+	RET
+
+// softmax_scale_simd(x, scale, size)
+// Multiplies all elements: x[i] *= scale
+//
+// Parameters:
+//   x:     BP (RARG)  - array to scale (in-place)
+//   scale: 16(SP)     - scalar multiplier
+//   size:  24(SP)     - array length
+TEXT softmax_scale_simd(SB), $0
+	MOVSS	16(SP), X1		// X1 = scale
+	MOVL	24(SP), CX		// CX = size
+	TESTL	CX, CX
+	JLE	sscale_done
+
+	// Broadcast scale to all lanes
+	SHUFPS	$0x00, X1, X1		// X1 = [s, s, s, s]
+
+	XORL	AX, AX			// AX = i = 0
+
+sscale_loop4:
+	MOVL	CX, R8
+	SUBL	$3, R8			// R8 = size - 3
+	MOVL	R8, R9
+	SUBL	AX, R9			// R9 = (size - 3) - i
+	TESTL	R9, R9
+	JLE	sscale_remainder
+
+	MOVUPS	(BP)(AX*4), X0
+	MULPS	X1, X0
+	MOVUPS	X0, (BP)(AX*4)
+
+	ADDL	$4, AX
+	JMP	sscale_loop4
+
+sscale_remainder:
+	MOVL	CX, R9
+	SUBL	AX, R9			// R9 = size - i
+	TESTL	R9, R9
+	JLE	sscale_done
+
+	MOVSS	(BP)(AX*4), X0
+	MULSS	X1, X0
+	MOVSS	X0, (BP)(AX*4)
+
+	INCL	AX
+	JMP	sscale_remainder
+
+sscale_done:
+	RET
+
+// softmax_subtract_simd(x, val, size)
+// Subtracts scalar from all elements: x[i] -= val
+//
+// Parameters:
+//   x:    BP (RARG)  - array to modify (in-place)
+//   val:  16(SP)     - scalar to subtract
+//   size: 24(SP)     - array length
+TEXT softmax_subtract_simd(SB), $0
+	MOVSS	16(SP), X1		// X1 = val
+	MOVL	24(SP), CX		// CX = size
+	TESTL	CX, CX
+	JLE	ssub_done
+
+	// Broadcast val to all lanes
+	SHUFPS	$0x00, X1, X1
+
+	XORL	AX, AX			// AX = i = 0
+
+ssub_loop4:
+	MOVL	CX, R8
+	SUBL	$3, R8			// R8 = size - 3
+	MOVL	R8, R9
+	SUBL	AX, R9			// R9 = (size - 3) - i
+	TESTL	R9, R9
+	JLE	ssub_remainder
+
+	MOVUPS	(BP)(AX*4), X0
+	SUBPS	X1, X0
+	MOVUPS	X0, (BP)(AX*4)
+
+	ADDL	$4, AX
+	JMP	ssub_loop4
+
+ssub_remainder:
+	MOVL	CX, R9
+	SUBL	AX, R9			// R9 = size - i
+	TESTL	R9, R9
+	JLE	ssub_done
+
+	MOVSS	(BP)(AX*4), X0
+	SUBSS	X1, X0
+	MOVSS	X0, (BP)(AX*4)
+
+	INCL	AX
+	JMP	ssub_remainder
+
+ssub_done:
+	RET
+
+// exp_schraudolph_simd(x, size)
+// Fast exp approximation using Schraudolph's method
+// exp(x) ≈ reinterpret_float((int)(1512775 * x + 1072632447))
+// Applied in-place to array x
+//
+// Parameters:
+//   x:    BP (RARG)  - array to transform (in-place)
+//   size: 16(SP)     - array length
+//
+// Schraudolph constants:
+//   a = 2^23 / ln(2) = 12102203.161561 ≈ 12102203 (round down for stability)
+//   b = 2^23 * (127 - c) where c ≈ 0.045 for bias correction
+//   b = 2^23 * 126.96 ≈ 1064866805
+//
+// For single precision (float32):
+//   a = 1512775.21 ≈ 1512775
+//   b = 1072632447 (IEEE 754 representation of e^0 = 1.0 is close)
+TEXT exp_schraudolph_simd(SB), $0
+	MOVL	16(SP), CX		// CX = size
+	TESTL	CX, CX
+	JLE	schr_done
+
+	// Load constants for Schraudolph approximation
+	// a = 12102203.0f = 2^23/ln(2) = 0x4B38AA5B
+	// b = 1064866805 = 127*2^23 - 486411 (bias with correction)
+	MOVL	$0x4B38AA5B, R8		// 12102203.0f in IEEE754
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9			// R9 has 12102203.0f in both halves
+	MOVQ	R9, X1			// Load into low 64 bits
+	MOVLHPS	X1, X1			// Broadcast to all 4 lanes
+
+	// b = 1064866805 = 0x3F7D6F8D (includes correction term)
+	MOVL	$1064866805, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X2
+	MOVLHPS	X2, X2			// X2 = [b, b, b, b]
+
+	XORL	AX, AX			// AX = i = 0
+
+schr_loop4:
+	MOVL	CX, R8
+	SUBL	$3, R8
+	MOVL	R8, R9
+	SUBL	AX, R9
+	TESTL	R9, R9
+	JLE	schr_remainder
+
+	MOVUPS	(BP)(AX*4), X0		// X0 = x[i:i+4]
+	MULPS	X1, X0			// X0 = a * x
+	// CVTTPS2DQ X0, X0: 66 0F 5B C0 (convert packed floats to ints with truncation)
+	BYTE $0x66; BYTE $0x0F; BYTE $0x5B; BYTE $0xC0
+	// PADDD X0, X2: 66 0F FE C2 (add packed dwords: X0 += X2)
+	// ModR/M C2 = 11 000 010 (reg=X0=000, r/m=X2=010)
+	BYTE $0x66; BYTE $0x0F; BYTE $0xFE; BYTE $0xC2
+	// X0 now contains the IEEE 754 bit pattern to reinterpret as floats
+	// PADDD result stays as the float bits when we store
+	MOVUPS	X0, (BP)(AX*4)		// Store (reinterpret as float)
+
+	ADDL	$4, AX
+	JMP	schr_loop4
+
+schr_remainder:
+	MOVL	CX, R9
+	SUBL	AX, R9
+	TESTL	R9, R9
+	JLE	schr_done
+
+	// Scalar fallback for remaining elements
+	MOVSS	(BP)(AX*4), X0
+	MULSS	X1, X0
+	// CVTTSS2SI R10, X0: F3 4C 0F 2C D0 (convert scalar float to 64-bit int)
+	// REX.WR=0x4C (W=1 for 64-bit, R=1 for R10), ModR/M D0 = reg=R10[2:0]=010, r/m=X0=000
+	BYTE $0xF3; BYTE $0x4C; BYTE $0x0F; BYTE $0x2C; BYTE $0xD0
+	ADDL	$1064866805, R10	// Add bias
+	MOVL	R10, (BP)(AX*4)		// Store (reinterpret as float)
+
+	INCL	AX
+	JMP	schr_remainder
+
+schr_done:
+	RET
+
+// exp_poly_simd(x, size)
+// Polynomial exp approximation using range reduction + 4th degree polynomial
+// exp(x) = 2^i * exp(f) where i = floor(x/ln2), f = x - i*ln2
+// exp(f) ≈ 1 + f + f²/2 + f³/6 + f⁴/24 for f in [0, ln2)
+//
+// Parameters:
+//   x:    BP (RARG)  - array to transform (in-place)
+//   size: 16(SP)     - array length
+TEXT exp_poly_simd(SB), $0
+	MOVL	16(SP), CX		// CX = size
+	TESTL	CX, CX
+	JLE	poly_done
+
+	// Load constants for polynomial evaluation
+	// ln2_inv = 1/ln(2) = 1.4426950408889634 = 0x3FB8AA3B
+	MOVL	$0x3FB8AA3B, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X1
+	MOVLHPS	X1, X1			// X1 = ln2_inv broadcast
+
+	// ln2 = 0.6931471805599453 = 0x3F317218
+	MOVL	$0x3F317218, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X2
+	MOVLHPS	X2, X2			// X2 = ln2 broadcast
+
+	// c1 = 1.0 = 0x3F800000 (coefficient for f^1)
+	MOVL	$0x3F800000, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X3
+	MOVLHPS	X3, X3			// X3 = 1.0 broadcast
+
+	// c2 = 0.5 = 0x3F000000 (coefficient for f^2)
+	MOVL	$0x3F000000, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X4
+	MOVLHPS	X4, X4			// X4 = 0.5 broadcast
+
+	// c3 = 1/6 ≈ 0.166666667 = 0x3E2AAAAB (coefficient for f^3)
+	MOVL	$0x3E2AAAAB, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X5
+	MOVLHPS	X5, X5			// X5 = 1/6 broadcast
+
+	// c4 = 1/24 ≈ 0.041666668 = 0x3D2AAAAB (coefficient for f^4)
+	MOVL	$0x3D2AAAAB, R8
+	MOVL	R8, R9
+	SHLQ	$32, R9
+	ORQ	R8, R9
+	MOVQ	R9, X6
+	MOVLHPS	X6, X6			// X6 = 1/24 broadcast
+
+	XORL	AX, AX			// AX = i = 0
+
+poly_loop1:
+	// Process one element at a time for simplicity (vectorize later if needed)
+	MOVL	CX, R8
+	SUBL	AX, R8
+	TESTL	R8, R8
+	JLE	poly_done
+
+	// Load x
+	MOVSS	(BP)(AX*4), X0		// X0 = x
+
+	// i = floor(x / ln2)
+	MOVAPS	X0, X7
+	MULSS	X1, X7			// X7 = x * ln2_inv
+	// Floor: convert to int (truncate toward zero), then adjust for negative
+	// CVTTSS2SI R10, X7: F3 4C 0F 2C D7 (convert X7 to int64 in R10)
+	// REX.WR=0x4C (W=1, R=1), ModR/M D7 = reg=R10[2:0]=010, r/m=X7=111
+	BYTE $0xF3; BYTE $0x4C; BYTE $0x0F; BYTE $0x2C; BYTE $0xD7
+	// Check if we need to subtract 1 for negative numbers
+	MOVL	R10, R11
+	SARL	$31, R11		// R11 = -1 if R10 < 0, else 0
+	// For proper floor, if original was negative and not exact, subtract 1
+	// CVTSI2SS X7, R10: F3 49 0F 2A FA (convert R10 to float in X7)
+	// REX.WB=0x49 (W=1, B=1), ModR/M FA = reg=X7=111, r/m=R10[2:0]=010
+	BYTE $0xF3; BYTE $0x49; BYTE $0x0F; BYTE $0x2A; BYTE $0xFA
+	MOVAPS	X0, X8
+	MULSS	X1, X8			// X8 = x * ln2_inv
+	// Skip floor adjustment for now - simpler approximation
+
+	// f = x - i * ln2
+	// CVTSI2SS X7, R10: F3 49 0F 2A FA (convert R10 to float in X7)
+	BYTE $0xF3; BYTE $0x49; BYTE $0x0F; BYTE $0x2A; BYTE $0xFA
+	MOVAPS	X7, X8
+	MULSS	X2, X8			// X8 = i * ln2
+	MOVAPS	X0, X7
+	SUBSS	X8, X7			// X7 = f = x - i * ln2
+
+	// Polynomial: 1 + f*(1 + f*(0.5 + f*(1/6 + f*1/24)))
+	// Horner's method from inside out
+	MOVAPS	X7, X8			// X8 = f
+	MULSS	X6, X8			// X8 = f * (1/24)
+	ADDSS	X5, X8			// X8 = 1/6 + f*(1/24)
+	MULSS	X7, X8			// X8 = f * (1/6 + f*(1/24))
+	ADDSS	X4, X8			// X8 = 0.5 + f*(...)
+	MULSS	X7, X8			// X8 = f * (0.5 + ...)
+	ADDSS	X3, X8			// X8 = 1 + f*(...)
+	MULSS	X7, X8			// X8 = f * (1 + ...)
+	ADDSS	X3, X8			// X8 = 1 + f*(...) = exp(f)
+
+	// Result = exp(f) * 2^i
+	// 2^i is done by adding i to the exponent field of the float
+	// exponent = i + 127 (bias), then shift left 23 bits
+	ADDL	$127, R10		// R10 = biased exponent
+	// Clamp to valid range [0, 255]
+	TESTL	R10, R10
+	JL	poly_underflow
+	CMPL	R10, $255
+	JGE	poly_overflow
+	SHLL	$23, R10		// R10 = 2^i in IEEE 754 format
+	// MOVD X9, R10d: 66 45 0F 6E CA (move 32-bit from R10 to X9)
+	// REX.RB=0x45 (R=1 for X9, B=1 for R10), ModR/M CA = reg=X9[2:0]=001, r/m=R10[2:0]=010
+	BYTE $0x66; BYTE $0x45; BYTE $0x0F; BYTE $0x6E; BYTE $0xCA
+	MULSS	X9, X8			// X8 = exp(f) * 2^i
+
+	MOVSS	X8, (BP)(AX*4)		// Store result
+	INCL	AX
+	JMP	poly_loop1
+
+poly_underflow:
+	// Underflow: return 0
+	XORPS	X8, X8
+	MOVSS	X8, (BP)(AX*4)
+	INCL	AX
+	JMP	poly_loop1
+
+poly_overflow:
+	// Overflow: return large value
+	MOVL	$0x7F7FFFFF, R10	// Max float
+	MOVL	R10, (BP)(AX*4)
+	INCL	AX
+	JMP	poly_loop1
+
+poly_done:
+	RET

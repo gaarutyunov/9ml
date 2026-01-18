@@ -21,6 +21,10 @@ SIMD_VALIDATION=test_simd_validation
 SOFTMAX_SIMD=test_softmax_simd
 RMSNORM_SIMD=test_rmsnorm_simd
 
+# Softmax benchmark and accuracy tests (require SIMD assembly)
+SOFTMAX_BENCH=test_softmax_benchmark
+SOFTMAX_ACCURACY=test_softmax_accuracy
+
 # SIMD debug test (minimal, fast)
 SIMD_DEBUG=test_simd_debug
 
@@ -30,7 +34,7 @@ THREAD_SIMD=test_thread_with_simd
 # SIMD assembly from parent directory
 SIMD_ASM=../simd_amd64.$O ../simdq_amd64.$O
 
-all:V: $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD $SOFTMAX_SIMD $RMSNORM_SIMD
+all:V: $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD $SOFTMAX_SIMD $RMSNORM_SIMD $SOFTMAX_BENCH $SOFTMAX_ACCURACY
 
 # Standard tests use default rules
 %: %.$O
@@ -63,6 +67,14 @@ $SOFTMAX_SIMD: $SOFTMAX_SIMD.$O $SIMD_ASM
 $RMSNORM_SIMD: $RMSNORM_SIMD.$O $SIMD_ASM
 	$LD -o $target $prereq
 
+# Softmax benchmark test needs assembly linked
+$SOFTMAX_BENCH: $SOFTMAX_BENCH.$O $SIMD_ASM
+	$LD -o $target $prereq
+
+# Softmax accuracy test needs assembly linked
+$SOFTMAX_ACCURACY: $SOFTMAX_ACCURACY.$O $SIMD_ASM
+	$LD -o $target $prereq
+
 # Assembly compilation (if not already built in parent)
 ../simd_amd64.$O: ../simd_amd64.s
 	$AS ../simd_amd64.s
@@ -71,4 +83,4 @@ $RMSNORM_SIMD: $RMSNORM_SIMD.$O $SIMD_ASM
 	$AS ../simdq_amd64.s
 
 clean:V:
-	rm -f *.$O $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD $SOFTMAX_SIMD $RMSNORM_SIMD *.out
+	rm -f *.$O $TESTS $BENCH $BENCH_Q8 $SIMD_VALIDATION $SIMD_DEBUG $THREAD_SIMD $SOFTMAX_SIMD $RMSNORM_SIMD $SOFTMAX_BENCH $SOFTMAX_ACCURACY *.out

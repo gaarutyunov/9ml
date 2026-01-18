@@ -20,6 +20,7 @@ void error_usage(void) {
     fprint(2, "  -y <string> (optional) system prompt in chat mode\n");
     fprint(2, "  -j <int>    number of threads (default: auto-detect, 1 = single-threaded)\n");
     fprint(2, "  --no-simd   disable SIMD optimizations (use scalar code)\n");
+    fprint(2, "  --softmax-mode <int>  softmax algorithm (0=scalar, 1=partial, 2=schraudolph, 3=poly, 4=lut)\n");
     exits("usage");
 }
 
@@ -48,6 +49,12 @@ threadmain(int argc, char *argv[]) {
         // Handle long options first
         if (match_long_opt(argv[i], "--no-simd")) {
             opt_config.use_simd = 0;
+            continue;
+        }
+        if (match_long_opt(argv[i], "--softmax-mode")) {
+            if (i + 1 >= argc) { error_usage(); }
+            opt_config.softmax_mode = atoi(argv[i + 1]);
+            i++;
             continue;
         }
 
@@ -80,9 +87,13 @@ threadmain(int argc, char *argv[]) {
     opt_init();
 
     // Print optimization settings
-    fprint(2, "Optimization: SIMD=%s, threads=%d\n",
+    char *softmax_names[] = {"scalar", "partial", "schraudolph", "poly", "lut"};
+    char *softmax_name = (opt_config.softmax_mode >= 0 && opt_config.softmax_mode <= 4)
+                         ? softmax_names[opt_config.softmax_mode] : "unknown";
+    fprint(2, "Optimization: SIMD=%s, threads=%d, softmax=%s\n",
            opt_config.use_simd ? "on" : "off",
-           opt_config.nthreads);
+           opt_config.nthreads,
+           softmax_name);
 
     // build the Transformer
     Transformer transformer;

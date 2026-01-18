@@ -91,6 +91,8 @@ static int prepare_shared_disk(void) {
         /* Assembly SIMD - uses SSE packed instructions for 4x float parallelism.
          * Provides matmul_simd, rmsnorm_simd, etc. using MOVUPS, MULPS, ADDPS. */
         SRC_DIR "/simd_amd64.s",
+        /* Quantized SIMD - provides matmul_q8_simd for int8 quantized matmul */
+        SRC_DIR "/simdq_amd64.s",
         TESTS_DIR "/test_rmsnorm.c",
         TESTS_DIR "/test_softmax.c",
         TESTS_DIR "/test_matmul.c",
@@ -111,6 +113,8 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_arch_detect.c",
         TESTS_DIR "/test_arch_llama3.c",
         TESTS_DIR "/test_format_detect.c",
+        TESTS_DIR "/test_softmax_benchmark.c",
+        TESTS_DIR "/test_softmax_accuracy.c",
         NULL
     };
 
@@ -228,6 +232,7 @@ static int run_vm_tests(void) {
 
     /* Compile SIMD assembly first (needed by run.c, runq.c, benchmark, llmfs) */
     run_vm_cmd("6a simd_amd64.s >[2=1] > simd_asm.log; echo asm_done", 30);
+    run_vm_cmd("6a simdq_amd64.s >[2=1] > simdq_asm.log; echo asm_done", 30);
 
     /* Compile arch plugin library (needed by run.c which includes model.c) */
     run_vm_cmd("cd arch && 6c -w arch.c llama2.c llama3.c mistral.c >[2=1] > ../arch_compile.log; echo arch_compile_done", 60);
@@ -254,7 +259,7 @@ static int run_vm_tests(void) {
 
     /* Quantized generation test (runq.c with Q8_0 model) */
     run_vm_cmd("6c -w runq.c", 60);
-    run_vm_cmd("6l -o runq runq.6 simd_amd64.6", 30);
+    run_vm_cmd("6l -o runq runq.6 simd_amd64.6 simdq_amd64.6", 30);
     run_vm_cmd("./runq stories15M_q80.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation_q.out >[2=1]", 120);
 
     /* Simple threading test first (no SIMD linked) */
@@ -325,6 +330,16 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w test_format_detect.c", 60);
     run_vm_cmd("6l -o t_format_detect test_format_detect.6", 30);
     run_vm_cmd("./t_format_detect > format_detect.out >[2=1]", 60);
+
+    /* Softmax benchmark test */
+    run_vm_cmd("6c -w test_softmax_benchmark.c", 60);
+    run_vm_cmd("6l -o t_softmax_bench test_softmax_benchmark.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_softmax_bench > softmax_benchmark.out >[2=1]", 300);
+
+    /* Softmax accuracy test */
+    run_vm_cmd("6c -w test_softmax_accuracy.c", 60);
+    run_vm_cmd("6l -o t_softmax_acc test_softmax_accuracy.6 simd_amd64.6", 30);
+    run_vm_cmd("./t_softmax_acc > softmax_accuracy.out >[2=1]", 300);
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -824,18 +839,30 @@ static void test_generation_quantized(void) {
         return;
     }
 
-    /* Extract first line (the generated text, before tok/s stats) */
-    char *fp32_line = strtok(fp32_data, "\n");
-    char *q_line = strtok(data, "\n");
+    /* Extract optimization line and generated text */
+    char *fp32_opt = strtok(fp32_data, "\n");
+    char *fp32_text = strtok(NULL, "\n");
 
-    if (fp32_line && q_line && strcmp(fp32_line, q_line) == 0) {
+    /* Make a copy since we'll strtok the other buffer */
+    char data_copy[4096];
+    strncpy(data_copy, data, sizeof(data_copy) - 1);
+    data_copy[sizeof(data_copy) - 1] = '\0';
+
+    char *q_opt = strtok(data, "\n");
+    char *q_text = strtok(NULL, "\n");
+
+    if (fp32_text && q_text && strcmp(fp32_text, q_text) == 0) {
         add_result("generation_quantized", 1, 0, NULL);
-        printf("PASS (matches FP32)\n");
+        printf("PASS (Q8 matches FP32)\n");
+        if (q_opt) printf("  Q8 settings: %s\n", q_opt);
+        if (q_text) printf("  Q8 output:   %.70s...\n", q_text);
     } else {
         add_result("generation_quantized", 0, 0, "output differs from FP32");
         printf("FAIL (output differs from FP32)\n");
-        if (fp32_line) printf("  FP32: %.50s...\n", fp32_line);
-        if (q_line) printf("  Q8_0: %.50s...\n", q_line);
+        if (fp32_opt) printf("  FP32 settings: %s\n", fp32_opt);
+        if (fp32_text) printf("  FP32 output:   %.70s...\n", fp32_text);
+        if (q_opt) printf("  Q8 settings:   %s\n", q_opt);
+        if (q_text) printf("  Q8 output:     %.70s...\n", q_text);
     }
     free(fp32_data);
     free(data);
@@ -1096,6 +1123,49 @@ static void test_arch_detect(void) {
     free(data);
 }
 
+/* Test: softmax benchmark */
+static void test_softmax_benchmark(void) {
+    printf("Testing softmax_benchmark... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "softmax_benchmark.out", &size);
+    if (!data || size == 0) {
+        add_result("softmax_benchmark", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for CHECKSUM VALIDATION in output */
+    if (strstr(data, "CHECKSUM VALIDATION PASSED") != NULL) {
+        add_result("softmax_benchmark", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "CHECKSUM VALIDATION FAILED") != NULL) {
+        add_result("softmax_benchmark", 0, 0, "checksum validation failed");
+        printf("FAIL (checksum validation failed)\n");
+    } else {
+        add_result("softmax_benchmark", 0, 0, "no checksum validation");
+        printf("FAIL (no checksum validation)\n");
+    }
+
+    /* Print benchmark results */
+    printf("  Softmax benchmark output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "Mode") ||
+            strstr(line, "Scalar") || strstr(line, "Partial") ||
+            strstr(line, "Schraudolph") || strstr(line, "Polynomial") ||
+            strstr(line, "LUT") || strstr(line, "Best") ||
+            strstr(line, "CHECKSUM") || strstr(line, "-----")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
 /* Test: LLaMA 3 architecture */
 static void test_arch_llama3(void) {
     printf("Testing arch_llama3... ");
@@ -1129,6 +1199,47 @@ static void test_arch_llama3(void) {
         if (strstr(line, "===") || strstr(line, "PASS") ||
             strstr(line, "FAIL") || strstr(line, "Test") ||
             strstr(line, "Result") || strstr(line, "theta")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: softmax accuracy */
+static void test_softmax_accuracy(void) {
+    printf("Testing softmax_accuracy... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "softmax_accuracy.out", &size);
+    if (!data || size == 0) {
+        add_result("softmax_accuracy", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All softmax accuracy tests passed") != NULL) {
+        add_result("softmax_accuracy", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("softmax_accuracy", 0, 0, "softmax accuracy tests failed");
+        printf("FAIL (softmax accuracy tests failed)\n");
+    } else {
+        add_result("softmax_accuracy", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Softmax accuracy output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Testing mode") ||
+            strstr(line, "Summary")) {
             printf("    %s\n", line);
         }
         line = strtok(NULL, "\n");
@@ -1564,6 +1675,8 @@ int main(int argc, char *argv[]) {
     if (should_run_test("arch_detect")) test_arch_detect();
     if (should_run_test("arch_llama3")) test_arch_llama3();
     if (should_run_test("format_detect")) test_format_detect();
+    if (should_run_test("softmax_benchmark")) test_softmax_benchmark();
+    if (should_run_test("softmax_accuracy")) test_softmax_accuracy();
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
 
