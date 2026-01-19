@@ -81,4 +81,9 @@ char *st_dtype_name(int dtype);
 /* Free tensor list (for st_find_tensors results) */
 void st_tensor_list_free(STTensor *t);
 
+/* Load safetensors file into Transformer structure.
+ * Allocates memory and converts weights to FP32.
+ * transformer parameter is void* to decouple from arch/arch.h */
+int st_load_transformer(char *path, void *transformer);
+
 #endif /* SAFETENSORS_H */

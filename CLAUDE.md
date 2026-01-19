@@ -306,6 +306,81 @@ Build on Plan 9:
 
 ---
 
+## Supported Model Formats
+
+9ml supports three model formats with automatic detection:
+
+### Format Detection
+
+The model loader automatically detects format based on file magic:
+1. **GGUF**: Magic `0x46554747` ("GGUF" in little-endian)
+2. **Safetensors**: 8-byte header size followed by JSON metadata
+3. **Legacy (.bin)**: Native llama2.c format with 7-int or 10-int header
+
+### Format Comparison
+
+| Feature | Legacy (.bin) | Safetensors | GGUF |
+|---------|---------------|-------------|------|
+| Source | llama2.c native | HuggingFace | llama.cpp |
+| Precision | FP32 | FP32/FP16 | FP32/FP16/Quantized |
+| Quantization | Q8_0 via export | No | Q4_0, Q8_0, etc. |
+| Metadata | Minimal (7-10 ints) | JSON header | Key-value pairs |
+| Tensor names | Positional | HuggingFace names | GGML names |
+| File size (15M) | ~60 MB | ~60 MB | ~15-17 MB (Q8_0) |
+
+### Tensor Name Mapping
+
+Different formats use different tensor names:
+
+| Weight | Legacy (position) | HuggingFace/Safetensors | GGUF |
+|--------|-------------------|-------------------------|------|
+| Token embeddings | 0 | `model.embed_tokens.weight` | `token_embd.weight` |
+| Q projection | per-layer | `model.layers.N.self_attn.q_proj.weight` | `blk.N.attn_q.weight` |
+| K projection | per-layer | `model.layers.N.self_attn.k_proj.weight` | `blk.N.attn_k.weight` |
+| V projection | per-layer | `model.layers.N.self_attn.v_proj.weight` | `blk.N.attn_v.weight` |
+| O projection | per-layer | `model.layers.N.self_attn.o_proj.weight` | `blk.N.attn_output.weight` |
+| Gate (w1) | per-layer | `model.layers.N.mlp.gate_proj.weight` | `blk.N.ffn_gate.weight` |
+| Up (w3) | per-layer | `model.layers.N.mlp.up_proj.weight` | `blk.N.ffn_up.weight` |
+| Down (w2) | per-layer | `model.layers.N.mlp.down_proj.weight` | `blk.N.ffn_down.weight` |
+| Attn norm | per-layer | `model.layers.N.input_layernorm.weight` | `blk.N.attn_norm.weight` |
+| FFN norm | per-layer | `model.layers.N.post_attention_layernorm.weight` | `blk.N.ffn_norm.weight` |
+| Final norm | last | `model.norm.weight` | `output_norm.weight` |
+| Output | last (or tied) | `lm_head.weight` | `output.weight` |
+
+### GGUF Attention Weight Interleaving
+
+**Important:** llama.cpp's GGUF converter interleaves Q and K attention weights for rotary position embeddings. Within each attention head of `head_dim` rows:
+
+- GGUF rows 0,2,4,... contain original rows 0,1,2,...
+- GGUF rows 1,3,5,... contain original rows head_dim/2, head_dim/2+1,...
+
+The 9ml GGUF loader automatically de-interleaves these weights during loading to match the standard llama2.c layout.
+
+### Creating GGUF Files
+
+To create a GGUF from a HuggingFace model using llama.cpp:
+
+```bash
+# Install llama.cpp
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp && cmake -B build && cmake --build build
+
+# Convert to F32 GGUF
+python convert_hf_to_gguf.py /path/to/hf-model --outtype f32
+
+# Quantize to Q8_0
+./build/bin/llama-quantize model-f32.gguf model-Q8_0.gguf Q8_0
+```
+
+### Tied Embeddings
+
+Some models share weights between token embeddings and output projection (`tie_word_embeddings: true`). The loaders handle this:
+- **Safetensors**: Only `model.embed_tokens.weight` present, used for both
+- **GGUF**: Only `output.weight` present, used for both (loader falls back)
+- **Legacy**: Indicated by negative `vocab_size` in header
+
+---
+
 ## LLM File Server (llmfs)
 
 A 9P file server that exposes LLM inference as a Plan 9 filesystem, enabling distributed inference across machines. Supports multiple models with LRU eviction and per-session model binding.

@@ -15,6 +15,10 @@
 /* Include arch plugin types and registry */
 #include "arch/arch.h"
 
+/* Include format parsers for GGUF and safetensors */
+#include "format/gguf.h"
+#include "format/safetensors.h"
+
 // ----------------------------------------------------------------------------
 // Optimization configuration
 
@@ -465,7 +469,12 @@ void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared
 }
 
 // ----------------------------------------------------------------------------
-// 9ml Model Format
+// Model Format Detection and Loading
+//
+// Supported formats:
+//   - GGUF: llama.cpp format with GGUF magic (0x46554747)
+//   - Safetensors: HuggingFace format (8-byte header size + JSON)
+//   - Legacy/9ml: Custom binary format (llama2.c compatible)
 //
 // Legacy format (llama2.c compatible): 7 ints (28 bytes)
 //   dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len
@@ -480,15 +489,79 @@ void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared
 //   sliding_window (4 bytes): 0=full attention, >0=window size
 //   reserved (4 bytes): for future use
 //   dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len (28 bytes)
-//
-// Detection: first 4 bytes. If == 0x394D4C01, it's extended format.
-// Otherwise it's legacy (first int is dim, typically 64-8192).
 
+/* Format type enumeration */
+enum {
+    FORMAT_UNKNOWN = 0,
+    FORMAT_LEGACY = 1,      /* llama2.c / 9ml custom binary */
+    FORMAT_GGUF = 2,        /* GGUF (llama.cpp) */
+    FORMAT_SAFETENSORS = 3, /* Safetensors (HuggingFace) */
+};
+
+/* Magic numbers */
 #define FORMAT_MAGIC_9ML_V1   0x394D4C01  /* "9ML\x01" */
+#define FORMAT_MAGIC_GGUF     0x46554747  /* "GGUF" */
 #define LEGACY_CONFIG_SIZE    (7 * sizeof(int))   /* 28 bytes */
 #define EXTENDED_HEADER_SIZE  (15 * sizeof(int))  /* 60 bytes */
 
 /* Architecture IDs are defined in arch/arch.h */
+
+/*
+ * detect_format - Detect model file format from magic bytes
+ * Returns FORMAT_GGUF, FORMAT_SAFETENSORS, or FORMAT_LEGACY
+ */
+static int
+detect_format(char *path)
+{
+    int fd;
+    uchar buf[16];
+    vlong n;
+
+    fd = open(path, OREAD);
+    if (fd < 0) {
+        return FORMAT_UNKNOWN;
+    }
+
+    n = read(fd, buf, 16);
+    close(fd);
+
+    if (n < 8) {
+        return FORMAT_UNKNOWN;
+    }
+
+    /* Check GGUF magic (little-endian "GGUF" = 0x46554747) */
+    uint magic = buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
+    if (magic == FORMAT_MAGIC_GGUF) {
+        return FORMAT_GGUF;
+    }
+
+    /* Check safetensors: first 8 bytes are header size (little-endian uint64)
+     * followed by JSON starting with '{'. Header size should be reasonable (< 100MB) */
+    uvlong header_size = (uvlong)buf[0] |
+                         ((uvlong)buf[1] << 8) |
+                         ((uvlong)buf[2] << 16) |
+                         ((uvlong)buf[3] << 24) |
+                         ((uvlong)buf[4] << 32) |
+                         ((uvlong)buf[5] << 40) |
+                         ((uvlong)buf[6] << 48) |
+                         ((uvlong)buf[7] << 56);
+
+    /* If header size is reasonable and next bytes look like JSON, it's safetensors */
+    if (header_size > 0 && header_size < 100*1024*1024 && n >= 9) {
+        /* Check if byte after header size looks like start of JSON */
+        if (buf[8] == '{') {
+            return FORMAT_SAFETENSORS;
+        }
+    }
+
+    /* Check 9ml extended format magic */
+    if (magic == FORMAT_MAGIC_9ML_V1) {
+        return FORMAT_LEGACY;
+    }
+
+    /* Default to legacy format (llama2.c) */
+    return FORMAT_LEGACY;
+}
 
 void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
                      float** data, vlong* file_size) {
@@ -623,11 +696,41 @@ void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weigh
 }
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
+    int format;
+
     // Initialize architecture subsystem once
     arch_init();
 
-    // read in the Config and the Weights from the checkpoint
-    read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->data, &t->file_size);
+    // Detect file format
+    format = detect_format(checkpoint_path);
+
+    // Clear transformer struct
+    memset(t, 0, sizeof(Transformer));
+
+    switch (format) {
+    case FORMAT_GGUF:
+        // Load from GGUF file (llama.cpp format)
+        if (gguf_load_transformer(checkpoint_path, t) < 0) {
+            fprint(2, "Failed to load GGUF model: %s\n", checkpoint_path);
+            exits("gguf");
+        }
+        break;
+
+    case FORMAT_SAFETENSORS:
+        // Load from safetensors file (HuggingFace format)
+        if (st_load_transformer(checkpoint_path, t) < 0) {
+            fprint(2, "Failed to load safetensors model: %s\n", checkpoint_path);
+            exits("safetensors");
+        }
+        break;
+
+    case FORMAT_LEGACY:
+    default:
+        // Load from legacy/9ml format
+        read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->data, &t->file_size);
+        break;
+    }
+
     // allocate the RunState buffers
     malloc_run_state(&t->state, &t->config);
 

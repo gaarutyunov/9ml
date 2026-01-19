@@ -572,3 +572,317 @@ st_tensor_list_free(STTensor *t)
         t = next;
     }
 }
+
+/* ----------------------------------------------------------------------------
+ * Safetensors to Transformer Loading
+ * ---------------------------------------------------------------------------- */
+
+/*
+ * Helper to load a single tensor by name into a float buffer.
+ * Returns number of floats loaded, or -1 on error.
+ */
+static vlong
+st_load_tensor_by_name(STFile *sf, char *name, float *out, vlong max_floats)
+{
+    STTensor *t = st_find_tensor(sf, name);
+    if (t == nil) {
+        fprint(2, "safetensors: tensor not found: %s\n", name);
+        return -1;
+    }
+    return st_read_tensor(sf, t, out, max_floats);
+}
+
+/*
+ * Load safetensors file into 9ml Transformer structure.
+ * Allocates memory and converts weights to FP32.
+ *
+ * Note: Uses void* for transformer to keep safetensors.h decoupled from arch/arch.h.
+ */
+int
+st_load_transformer(char *path, void *transformer)
+{
+    /* Local type definitions matching Transformer layout in arch/arch.h */
+    typedef struct {
+        int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len;
+        float rope_theta;
+        int arch_id;
+    } TConfig;
+
+    typedef struct {
+        float *token_embedding_table;
+        float *rms_att_weight;
+        float *rms_ffn_weight;
+        float *wq, *wk, *wv, *wo;
+        float *w1, *w2, *w3;
+        float *rms_final_weight;
+        float *wcls;
+    } TWeights;
+
+    typedef struct {
+        TConfig config;
+        TWeights weights;
+        void *state;
+        void *arch;
+        float *data;
+        vlong file_size;
+    } TTransformer;
+
+    TTransformer *t = (TTransformer *)transformer;
+    STFile sf;
+    STTensor *emb_tensor;
+    vlong weights_size;
+    float *weights_data;
+    float *ptr;
+    int l;
+    char name[128];
+
+    if (st_open(&sf, path) < 0) {
+        return -1;
+    }
+
+    /* Extract model configuration from tensor shapes */
+    /* lm_head.weight shape is [vocab_size, dim] */
+    emb_tensor = st_find_tensor(&sf, "lm_head.weight");
+    if (emb_tensor == nil) {
+        fprint(2, "safetensors: missing lm_head.weight\n");
+        st_close(&sf);
+        return -1;
+    }
+
+    if (emb_tensor->n_dims < 2) {
+        fprint(2, "safetensors: invalid lm_head.weight dimensions\n");
+        st_close(&sf);
+        return -1;
+    }
+
+    int vocab_size = (int)emb_tensor->dims[0];
+    int dim = (int)emb_tensor->dims[1];
+
+    /* Count layers by looking for model.layers.N.input_layernorm.weight */
+    int n_layers = 0;
+    for (l = 0; l < 256; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.input_layernorm.weight", l);
+        if (st_find_tensor(&sf, name) == nil)
+            break;
+        n_layers++;
+    }
+
+    if (n_layers == 0) {
+        fprint(2, "safetensors: no layers found\n");
+        st_close(&sf);
+        return -1;
+    }
+
+    /* Get hidden_dim from w1 shape [hidden_dim, dim] */
+    snprint(name, sizeof(name), "model.layers.0.mlp.gate_proj.weight");
+    STTensor *w1_tensor = st_find_tensor(&sf, name);
+    if (w1_tensor == nil || w1_tensor->n_dims < 2) {
+        fprint(2, "safetensors: missing or invalid gate_proj.weight\n");
+        st_close(&sf);
+        return -1;
+    }
+    int hidden_dim = (int)w1_tensor->dims[0];
+
+    /* Get n_heads from q_proj shape [dim, dim] - assume dim/head_size */
+    /* For now, default to 6 heads (stories15M) or calculate from wq shape */
+    /* The HF config has this info, but we're inferring from weights only */
+    snprint(name, sizeof(name), "model.layers.0.self_attn.q_proj.weight");
+    STTensor *wq_tensor = st_find_tensor(&sf, name);
+    if (wq_tensor == nil || wq_tensor->n_dims < 2) {
+        fprint(2, "safetensors: missing q_proj.weight\n");
+        st_close(&sf);
+        return -1;
+    }
+
+    /* Assume head_size = 48 (288/6) for stories15M, calculate n_heads */
+    int head_size = 48;  /* Common default */
+    if (dim == 288) head_size = 48;
+    else if (dim == 4096) head_size = 128;  /* LLaMA 7B/13B */
+    else head_size = dim / 8;  /* Guess 8 heads */
+
+    int n_heads = dim / head_size;
+    int n_kv_heads = n_heads;  /* Assume MHA (not GQA) */
+
+    /* Sequence length - default for stories15M */
+    int seq_len = 256;
+
+    /* Set config */
+    t->config.dim = dim;
+    t->config.hidden_dim = hidden_dim;
+    t->config.n_layers = n_layers;
+    t->config.n_heads = n_heads;
+    t->config.n_kv_heads = n_kv_heads;
+    t->config.vocab_size = vocab_size;
+    t->config.seq_len = seq_len;
+    t->config.rope_theta = 10000.0f;  /* Default LLaMA 2 */
+    t->config.arch_id = 1;  /* ARCH_LLAMA2 */
+
+    /* Calculate total weights size (all FP32) */
+    int kv_dim = (dim * n_kv_heads) / n_heads;
+    uvlong ul_layers = n_layers;
+
+    weights_size = 0;
+    weights_size += (uvlong)vocab_size * dim;           /* token_embedding_table */
+    weights_size += ul_layers * dim;                    /* rms_att_weight */
+    weights_size += ul_layers * dim * (n_heads * head_size);  /* wq */
+    weights_size += ul_layers * dim * kv_dim;           /* wk */
+    weights_size += ul_layers * dim * kv_dim;           /* wv */
+    weights_size += ul_layers * (n_heads * head_size) * dim;  /* wo */
+    weights_size += ul_layers * dim;                    /* rms_ffn_weight */
+    weights_size += ul_layers * dim * hidden_dim;       /* w1 */
+    weights_size += ul_layers * hidden_dim * dim;       /* w2 */
+    weights_size += ul_layers * dim * hidden_dim;       /* w3 */
+    weights_size += dim;                                /* rms_final_weight */
+
+    /* Allocate weights buffer */
+    weights_data = malloc(weights_size * sizeof(float));
+    if (weights_data == nil) {
+        fprint(2, "safetensors: failed to allocate %lld bytes\n",
+               weights_size * sizeof(float));
+        st_close(&sf);
+        return -1;
+    }
+    t->data = weights_data;
+    t->file_size = weights_size * sizeof(float);
+
+    /* Map weight pointers into the buffer */
+    ptr = weights_data;
+
+    /* token_embedding_table - use lm_head.weight (tied embeddings) */
+    t->weights.token_embedding_table = ptr;
+    if (st_load_tensor_by_name(&sf, "lm_head.weight", ptr,
+                               (vlong)vocab_size * dim) < 0) {
+        free(weights_data);
+        st_close(&sf);
+        return -1;
+    }
+    ptr += (uvlong)vocab_size * dim;
+
+    /* rms_att_weight (per layer) */
+    t->weights.rms_att_weight = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.input_layernorm.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr, dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += dim;
+    }
+
+    /* wq (per layer) */
+    t->weights.wq = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.self_attn.q_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr,
+                                   (vlong)dim * (n_heads * head_size)) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)dim * (n_heads * head_size);
+    }
+
+    /* wk (per layer) */
+    t->weights.wk = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.self_attn.k_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr, (vlong)dim * kv_dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)dim * kv_dim;
+    }
+
+    /* wv (per layer) */
+    t->weights.wv = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.self_attn.v_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr, (vlong)dim * kv_dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)dim * kv_dim;
+    }
+
+    /* wo (per layer) */
+    t->weights.wo = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.self_attn.o_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr,
+                                   (vlong)(n_heads * head_size) * dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)(n_heads * head_size) * dim;
+    }
+
+    /* rms_ffn_weight (per layer) */
+    t->weights.rms_ffn_weight = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.post_attention_layernorm.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr, dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += dim;
+    }
+
+    /* w1 - gate_proj (per layer) */
+    t->weights.w1 = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.mlp.gate_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr,
+                                   (vlong)dim * hidden_dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)dim * hidden_dim;
+    }
+
+    /* w2 - down_proj (per layer) */
+    t->weights.w2 = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.mlp.down_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr,
+                                   (vlong)hidden_dim * dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)hidden_dim * dim;
+    }
+
+    /* w3 - up_proj (per layer) */
+    t->weights.w3 = ptr;
+    for (l = 0; l < n_layers; l++) {
+        snprint(name, sizeof(name), "model.layers.%d.mlp.up_proj.weight", l);
+        if (st_load_tensor_by_name(&sf, name, ptr,
+                                   (vlong)dim * hidden_dim) < 0) {
+            free(weights_data);
+            st_close(&sf);
+            return -1;
+        }
+        ptr += (uvlong)dim * hidden_dim;
+    }
+
+    /* rms_final_weight */
+    t->weights.rms_final_weight = ptr;
+    if (st_load_tensor_by_name(&sf, "model.norm.weight", ptr, dim) < 0) {
+        free(weights_data);
+        st_close(&sf);
+        return -1;
+    }
+    ptr += dim;
+
+    /* wcls - shared with token_embedding_table (tied embeddings) */
+    t->weights.wcls = t->weights.token_embedding_table;
+
+    st_close(&sf);
+    return 0;
+}

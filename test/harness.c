@@ -24,8 +24,9 @@
 #define MODEL_FILE   "../stories15M.bin"
 #define MODEL_Q_FILE "../stories15M_q80.bin"
 #define TOKENIZER_FILE "../tokenizer.bin"
-#define GGUF_Q4_FILE "../tinyllama-15M-stories-Q4_0.gguf"
-#define GGUF_Q8_FILE "../tinyllama-15M-stories-Q8_0.gguf"
+#define GGUF_Q4_FILE "../models/stories15M-Q4_0.gguf"
+#define GGUF_Q8_FILE "../models/stories15M-Q8_0.gguf"
+#define SAFETENSORS_FILE "../models/stories15M.safetensors"
 
 /* Epsilon for float comparisons */
 #define EPSILON      0.0001f
@@ -73,7 +74,7 @@ static void add_result(const char *name, int passed, int skipped, const char *er
 /* Prepare shared disk with test files */
 static int prepare_shared_disk(void) {
     printf("Creating shared disk...\n");
-    if (fat_create(SHARED_IMAGE, 128) != 0) {
+    if (fat_create(SHARED_IMAGE, 256) != 0) {
         fprintf(stderr, "Failed to create shared disk\n");
         return -1;
     }
@@ -121,6 +122,7 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_gguf_parse.c",
         TESTS_DIR "/test_safetensors.c",
         TESTS_DIR "/test_pool_lru.c",
+        TESTS_DIR "/test_format_generation.c",
         NULL
     };
 
@@ -216,13 +218,20 @@ static int prepare_shared_disk(void) {
 
     /* Copy GGUF test models if present */
     if (file_exists(GGUF_Q4_FILE)) {
-        if (fat_copy_to(SHARED_IMAGE, GGUF_Q4_FILE, "tinyllama-15M-stories-Q4_0.gguf") != 0) {
+        if (fat_copy_to(SHARED_IMAGE, GGUF_Q4_FILE, "stories15M-Q4_0.gguf") != 0) {
             fprintf(stderr, "Warning: failed to copy Q4_0 GGUF file\n");
         }
     }
     if (file_exists(GGUF_Q8_FILE)) {
-        if (fat_copy_to(SHARED_IMAGE, GGUF_Q8_FILE, "tinyllama-15M-stories-Q8_0.gguf") != 0) {
+        if (fat_copy_to(SHARED_IMAGE, GGUF_Q8_FILE, "stories15M-Q8_0.gguf") != 0) {
             fprintf(stderr, "Warning: failed to copy Q8_0 GGUF file\n");
+        }
+    }
+
+    /* Copy safetensors model if present */
+    if (file_exists(SAFETENSORS_FILE)) {
+        if (fat_copy_to(SHARED_IMAGE, SAFETENSORS_FILE, "stories15M.safetensors") != 0) {
+            fprintf(stderr, "Warning: failed to copy safetensors file\n");
         }
     }
 
@@ -293,6 +302,10 @@ static int run_vm_tests(void) {
     run_vm_cmd("@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c } >[2=1] > archcmp.log; echo arch_compile_done", 60);
     run_vm_cmd("@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 } >[2=1] >> archcmp.log; echo arch_lib_done", 30);
 
+    /* Compile format library (needed by model.c for GGUF/safetensors loading) */
+    run_vm_cmd("@{ cd format; 6c -w gguf.c safetensors.c } >[2=1] > formatcmp.log; echo format_compile_done", 60);
+    run_vm_cmd("@{ cd format; ar vu format.a6 gguf.6 safetensors.6 } >[2=1] >> formatcmp.log; echo format_lib_done", 30);
+
     /* Compile and run each test (basic tests define DISABLE_THREADING in their source) */
     /* Tests that include model.c need arch/arch.a6 for arch plugin symbols */
     run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 arch/arch.a6 && ./t_rmsnorm > rmsnorm.out", 15);
@@ -305,9 +318,9 @@ static int run_vm_tests(void) {
 
     /* Generation test (needs model files) */
     /* Note: Plan 9 rc shell uses >[2] for stderr, not 2> */
-    /* Link with simd_amd64.6 for SSE vectorized SIMD functions and arch.a6 for plugins */
-    run_vm_cmd("6c -w run.c >[2=1] > runcmp.log; echo run_compile_done", 60);
-    run_vm_cmd("6l -o run run.6 simd_amd64.6 arch/arch.a6 >[2=1] >> runcmp.log; echo run_link_done", 30);
+    /* Link with simd_amd64.6 for SSE, arch.a6 for arch plugins, format.a6 for GGUF/safetensors */
+    run_vm_cmd("6c -w -Iformat run.c >[2=1] > runcmp.log; echo run_compile_done", 60);
+    run_vm_cmd("6l -o run run.6 simd_amd64.6 arch/arch.a6 format/format.a6 >[2=1] >> runcmp.log; echo run_link_done", 30);
     run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation.out >[2=1]", 120);
 
     /* Generation test WITH SIMD - must produce same output as scalar */
@@ -419,6 +432,12 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w -Ipool test_pool_lru.c >[2=1] > poolcmp.log; echo pool_compiled", 120);
     run_vm_cmd("6l -o t_pool_lru test_pool_lru.6 simd_amd64.6 arch/arch.a6 >[2=1] >> poolcmp.log; echo pool_linked", 30);
     run_vm_cmd("./t_pool_lru > pool_lru.out >[2=1]", 120);
+
+    /* Format generation comparison test - includes model.c, needs arch, format libs, and SIMD */
+    /* Tests that legacy, safetensors, and GGUF formats produce identical generation output */
+    run_vm_cmd("6c -w -Iformat -Ipool test_format_generation.c >[2=1] > fmtgen.log; echo fmtgen_compiled", 120);
+    run_vm_cmd("6l -o t_format_generation test_format_generation.6 simd_amd64.6 arch/arch.a6 format/format.a6 >[2=1] >> fmtgen.log; echo fmtgen_linked", 30);
+    run_vm_cmd("./t_format_generation > format_generation.out >[2=1]", 300);
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -1556,15 +1575,70 @@ static void test_pool_lru(void) {
     free(data);
 }
 
+/* Test: Format generation comparison */
+static void test_format_generation(void) {
+    printf("Testing format_generation... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "format_generation.out", &size);
+    if (!data || size == 0) {
+        /* Check compile log for errors */
+        char *log = fat_read_file(SHARED_IMAGE, "fmtgen.log", NULL);
+        if (log && strlen(log) > 0) {
+            add_result("format_generation", 0, 0, "compilation failed");
+            printf("FAIL (compilation failed)\n");
+            printf("  Compile log: %s\n", log);
+            free(log);
+        } else {
+            add_result("format_generation", 0, 0, "no output file - likely crashed");
+            printf("FAIL (no output - likely crashed)\n");
+        }
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL/SKIP in output */
+    if (strstr(data, "PASS: All format generation tests passed") != NULL) {
+        add_result("format_generation", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "SKIP:") != NULL) {
+        add_result("format_generation", 0, 1, "skipped - not enough models");
+        printf("SKIP (not enough model files for comparison)\n");
+    } else if (strstr(data, "FAIL") != NULL || strstr(data, "MISMATCH") != NULL) {
+        add_result("format_generation", 0, 0, "format comparison failed");
+        printf("FAIL (format comparison failed)\n");
+    } else {
+        add_result("format_generation", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Format generation output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "SKIP") ||
+            strstr(line, "MATCH") || strstr(line, "MISMATCH") ||
+            strstr(line, "Output:") || strstr(line, "Config:") ||
+            strstr(line, "Loading") || strstr(line, "Generating")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
 /* Run llmfs tests in single VM (local mount) */
 static void run_vm_llmfs_local(void) {
     printf("\n==================================================\n");
     printf("Running llmfs local tests in Plan 9...\n");
     printf("==================================================\n\n");
 
-    /* Compile llmfs - capture errors (SSE SIMD, arch plugins) */
-    run_vm_cmd("6c -w llmfs.c >[2=1] > llmfscmp.log; echo compile_done", 120);
-    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
+    /* Compile llmfs - capture errors (SSE SIMD, arch plugins, format loaders) */
+    run_vm_cmd("6c -w -Iformat llmfs.c >[2=1] > llmfscmp.log; echo compile_done", 120);
+    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 format/format.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
@@ -1700,11 +1774,16 @@ static int run_dualvm_llmfs_remote(void) {
     qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c }", 60);
     qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 }", 30);
 
-    /* CPU VM: Compile llmfs (SSE SIMD, arch plugins) */
+    /* CPU VM: Compile format library */
+    printf("CPU: Compiling format library...\n");
+    qemu_sendln_wait(&dualvm.cpu, "@{ cd format; 6c -w gguf.c safetensors.c }", 60);
+    qemu_sendln_wait(&dualvm.cpu, "@{ cd format; ar vu format.a6 gguf.6 safetensors.6 }", 30);
+
+    /* CPU VM: Compile llmfs (SSE SIMD, arch plugins, format loaders) */
     printf("CPU: Compiling llmfs...\n");
     qemu_sendln_wait(&dualvm.cpu, "6a simd_amd64.s", 30);
-    qemu_sendln_wait(&dualvm.cpu, "6c -w llmfs.c", 120);
-    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6", 60);
+    qemu_sendln_wait(&dualvm.cpu, "6c -w -Iformat llmfs.c", 120);
+    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 format/format.a6", 60);
 
     /* CPU VM: Start llmfs server and mount it locally */
     printf("CPU: Starting llmfs server...\n");
@@ -1949,6 +2028,7 @@ int main(int argc, char *argv[]) {
     if (should_run_test("gguf_parse")) test_gguf_parse();
     if (should_run_test("safetensors")) test_safetensors();
     if (should_run_test("pool_lru")) test_pool_lru();
+    if (should_run_test("format_generation")) test_format_generation();
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
 

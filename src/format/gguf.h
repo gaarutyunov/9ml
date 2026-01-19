@@ -68,6 +68,7 @@ enum {
 
 /* Q4_0 block: 32 weights quantized to 4 bits each = 16 bytes + 2 byte scale */
 #define QK4_0 32
+#define BLOCK_Q4_0_SIZE 18  /* On-disk size: 2 (FP16 scale) + 16 (packed 4-bit) */
 typedef struct {
     ushort d;           /* delta (FP16 scale) */
     uchar qs[QK4_0/2];  /* 4-bit quantized values (packed) */
@@ -75,6 +76,7 @@ typedef struct {
 
 /* Q8_0 block: 32 weights quantized to 8 bits each = 32 bytes + 2 byte scale */
 #define QK8_0 32
+#define BLOCK_Q8_0_SIZE 34  /* On-disk size: 2 (FP16 scale) + 32 (8-bit values) */
 typedef struct {
     ushort d;           /* delta (FP16 scale) */
     schar qs[QK8_0];    /* 8-bit quantized values */

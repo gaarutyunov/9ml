@@ -533,10 +533,10 @@ tensor_size_bytes(GGUFTensorInfo *t)
         return n * 2;
     case GGML_TYPE_Q4_0:
         /* Q4_0: 32 elements per block, 18 bytes per block (2 scale + 16 data) */
-        return (n / QK4_0) * sizeof(BlockQ4_0);
+        return (n / QK4_0) * BLOCK_Q4_0_SIZE;
     case GGML_TYPE_Q8_0:
         /* Q8_0: 32 elements per block, 34 bytes per block (2 scale + 32 data) */
-        return (n / QK8_0) * sizeof(BlockQ8_0);
+        return (n / QK8_0) * BLOCK_Q8_0_SIZE;
     default:
         fprint(2, "gguf: unsupported tensor type %d\n", t->type);
         return 0;
@@ -570,12 +570,12 @@ gguf_dequant_tensor(GGUFFile *gf, GGUFTensorInfo *tensor, float *out, vlong max_
     case GGML_TYPE_Q4_0:
         /* Round up to whole blocks */
         to_read = ((n + QK4_0 - 1) / QK4_0) * QK4_0;
-        read_size = (to_read / QK4_0) * sizeof(BlockQ4_0);
+        read_size = (to_read / QK4_0) * BLOCK_Q4_0_SIZE;
         break;
     case GGML_TYPE_Q8_0:
         /* Round up to whole blocks */
         to_read = ((n + QK8_0 - 1) / QK8_0) * QK8_0;
-        read_size = (to_read / QK8_0) * sizeof(BlockQ8_0);
+        read_size = (to_read / QK8_0) * BLOCK_Q8_0_SIZE;
         break;
     default:
         fprint(2, "gguf: unsupported tensor type %d for dequantization\n", tensor->type);
@@ -624,11 +624,17 @@ gguf_dequant_tensor(GGUFFile *gf, GGUFTensorInfo *tensor, float *out, vlong max_
     case GGML_TYPE_Q4_0:
         {
             uvlong nblocks = (n + QK4_0 - 1) / QK4_0;
-            BlockQ4_0 *blocks = (BlockQ4_0*)buf;
+            uchar *ptr = (uchar*)buf;
             float *p = out;
             for (i = 0; i < nblocks; i++) {
+                /* Parse packed block: 2 bytes scale + 16 bytes data */
+                BlockQ4_0 block;
+                block.d = ptr[0] | (ptr[1] << 8);  /* little-endian */
+                memmove(block.qs, ptr + 2, QK4_0/2);
+                ptr += BLOCK_Q4_0_SIZE;
+
                 float tmp[QK4_0];
-                dequant_q4_0(tmp, &blocks[i]);
+                dequant_q4_0(tmp, &block);
                 uvlong copy = QK4_0;
                 if (p - out + copy > n) copy = n - (p - out);
                 memmove(p, tmp, copy * sizeof(float));
@@ -640,11 +646,17 @@ gguf_dequant_tensor(GGUFFile *gf, GGUFTensorInfo *tensor, float *out, vlong max_
     case GGML_TYPE_Q8_0:
         {
             uvlong nblocks = (n + QK8_0 - 1) / QK8_0;
-            BlockQ8_0 *blocks = (BlockQ8_0*)buf;
+            uchar *ptr = (uchar*)buf;
             float *p = out;
             for (i = 0; i < nblocks; i++) {
+                /* Parse packed block: 2 bytes scale + 32 bytes data */
+                BlockQ8_0 block;
+                block.d = ptr[0] | (ptr[1] << 8);  /* little-endian */
+                memmove(block.qs, ptr + 2, QK8_0);
+                ptr += BLOCK_Q8_0_SIZE;
+
                 float tmp[QK8_0];
-                dequant_q8_0(tmp, &blocks[i]);
+                dequant_q8_0(tmp, &block);
                 uvlong copy = QK8_0;
                 if (p - out + copy > n) copy = n - (p - out);
                 memmove(p, tmp, copy * sizeof(float));
@@ -723,12 +735,23 @@ gguf_get_model_config(GGUFFile *gf, GGUFModelConfig *cfg)
     snprint(key, sizeof(key), "%s.attention.head_count_kv", cfg->arch_name);
     cfg->n_kv_heads = gguf_get_int(gf, key, cfg->n_heads);  /* default to n_heads */
 
-    /* Vocab size - from tokenizer metadata or tensor dimensions */
-    cfg->vocab_size = gguf_get_int(gf, "tokenizer.ggml.vocab_size", 0);
+    /* Vocab size - from model metadata or tensor dimensions */
+    /* Try architecture-specific key first (e.g., "llama.vocab_size") */
+    snprint(key, sizeof(key), "%s.vocab_size", cfg->arch_name);
+    cfg->vocab_size = gguf_get_int(gf, key, 0);
     if (cfg->vocab_size == 0) {
-        /* Try to infer from token_embd tensor */
+        /* Try tokenizer metadata */
+        cfg->vocab_size = gguf_get_int(gf, "tokenizer.ggml.vocab_size", 0);
+    }
+    if (cfg->vocab_size == 0) {
+        /* Try to infer from token_embd tensor.
+         * GGUF stores dimensions in Fortran order (column-major), so
+         * dims[1] is vocab_size and dims[0] is embedding_dim */
         GGUFTensorInfo *embd = gguf_find_tensor(gf, "token_embd.weight");
-        if (embd && embd->n_dims >= 1) {
+        if (embd && embd->n_dims >= 2) {
+            cfg->vocab_size = (int)embd->dims[1];
+        } else if (embd && embd->n_dims >= 1) {
+            /* Fallback for 1D tensors */
             cfg->vocab_size = (int)embd->dims[0];
         }
     }
@@ -754,5 +777,341 @@ gguf_get_model_config(GGUFFile *gf, GGUFModelConfig *cfg)
         cfg->arch_id = 0;  /* ARCH_UNKNOWN */
     }
 
+    return 0;
+}
+
+/* ----------------------------------------------------------------------------
+ * GGUF to Transformer Loading
+ * ---------------------------------------------------------------------------- */
+
+/*
+ * De-interleave Q/K attention weights.
+ *
+ * llama.cpp's converter applies an interleaving transformation to Q and K
+ * weights for rotary position embeddings. Within each head of head_dim rows:
+ *   - GGUF rows 0,2,4,... contain original rows 0,1,2,...
+ *   - GGUF rows 1,3,5,... contain original rows head_dim/2, head_dim/2+1,...
+ *
+ * This function reverses that transformation in-place.
+ *
+ * Parameters:
+ *   weights - pointer to weight matrix (n_heads * head_dim * dim)
+ *   n_heads - number of attention heads
+ *   head_dim - dimension per head (dim / n_heads)
+ *   dim - embedding dimension (row stride)
+ */
+static void
+deinterleave_qk_weights(float *weights, int n_heads, int head_dim, int dim)
+{
+    float *tmp;
+    int h, i;
+    int half = head_dim / 2;
+
+    /* Allocate temp buffer for one head's worth of rows */
+    tmp = malloc(head_dim * dim * sizeof(float));
+    if (tmp == nil) {
+        fprint(2, "gguf: failed to allocate deinterleave buffer\n");
+        return;
+    }
+
+    /* Process each head */
+    for (h = 0; h < n_heads; h++) {
+        float *head_weights = weights + h * head_dim * dim;
+
+        /* Copy interleaved data to temp buffer */
+        memmove(tmp, head_weights, head_dim * dim * sizeof(float));
+
+        /* De-interleave back to original order:
+         * Output row i (for i < half) comes from GGUF row 2*i
+         * Output row i (for i >= half) comes from GGUF row 2*(i-half)+1 */
+        for (i = 0; i < half; i++) {
+            /* First half: output row i from interleaved row 2*i */
+            memmove(head_weights + i * dim, tmp + (2 * i) * dim, dim * sizeof(float));
+        }
+        for (i = half; i < head_dim; i++) {
+            /* Second half: output row i from interleaved row 2*(i-half)+1 */
+            memmove(head_weights + i * dim, tmp + (2 * (i - half) + 1) * dim, dim * sizeof(float));
+        }
+    }
+
+    free(tmp);
+}
+
+/*
+ * Helper to load a single tensor by name into a float buffer.
+ * Returns number of floats loaded, or -1 on error.
+ */
+static vlong
+load_tensor_by_name(GGUFFile *gf, char *name, float *out, vlong max_floats)
+{
+    GGUFTensorInfo *t = gguf_find_tensor(gf, name);
+    if (t == nil) {
+        fprint(2, "gguf: tensor not found: %s\n", name);
+        return -1;
+    }
+    return gguf_dequant_tensor(gf, t, out, max_floats);
+}
+
+/*
+ * Load GGUF file into 9ml Transformer structure.
+ * This allocates memory and dequantizes all weights to FP32.
+ *
+ * Note: We use void* for the transformer parameter to keep gguf.h
+ * decoupled from arch/arch.h. The caller passes a Transformer*.
+ */
+int
+gguf_load_transformer(char *path, void *transformer)
+{
+    /* Local type definitions matching Transformer layout in arch/arch.h */
+    typedef struct {
+        int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len;
+        float rope_theta;
+        int arch_id;
+    } TConfig;
+
+    typedef struct {
+        float *token_embedding_table;
+        float *rms_att_weight;
+        float *rms_ffn_weight;
+        float *wq, *wk, *wv, *wo;
+        float *w1, *w2, *w3;
+        float *rms_final_weight;
+        float *wcls;
+    } TWeights;
+
+    typedef struct {
+        TConfig config;
+        TWeights weights;
+        void *state;
+        void *arch;
+        float *data;
+        vlong file_size;
+    } TTransformer;
+
+    TTransformer *t = (TTransformer *)transformer;
+    GGUFFile gf;
+    GGUFModelConfig cfg;
+    vlong weights_size;
+    float *weights_data;
+    float *ptr;
+    int l;
+    char name[128];
+
+    /*
+     * Disable Plan 9 FP exceptions during dequantization.
+     * GGUF files may contain denormalized FP16 scale values that
+     * trigger FPINVAL when used in arithmetic operations.
+     */
+    setfcr(getfcr() & ~(FPINVAL|FPZDIV|FPOVFL|FPUNFL|FPINEX));
+
+    if (gguf_open(&gf, path) < 0) {
+        return -1;
+    }
+
+    /* Extract model configuration */
+    if (gguf_get_model_config(&gf, &cfg) < 0) {
+        gguf_close(&gf);
+        return -1;
+    }
+
+    /* Copy config to transformer */
+    t->config.dim = cfg.dim;
+    t->config.hidden_dim = cfg.hidden_dim;
+    t->config.n_layers = cfg.n_layers;
+    t->config.n_heads = cfg.n_heads;
+    t->config.n_kv_heads = cfg.n_kv_heads;
+    t->config.vocab_size = cfg.vocab_size;
+    t->config.seq_len = cfg.seq_len;
+    t->config.rope_theta = cfg.rope_theta;
+    t->config.arch_id = cfg.arch_id;
+
+    /* Calculate total weights size (all FP32) */
+    int head_size = cfg.dim / cfg.n_heads;
+    int kv_dim = (cfg.dim * cfg.n_kv_heads) / cfg.n_heads;
+    uvlong n_layers = cfg.n_layers;
+
+    weights_size = 0;
+    weights_size += (uvlong)cfg.vocab_size * cfg.dim;           /* token_embedding_table */
+    weights_size += n_layers * cfg.dim;                          /* rms_att_weight */
+    weights_size += n_layers * cfg.dim * (cfg.n_heads * head_size);  /* wq */
+    weights_size += n_layers * cfg.dim * kv_dim;                 /* wk */
+    weights_size += n_layers * cfg.dim * kv_dim;                 /* wv */
+    weights_size += n_layers * (cfg.n_heads * head_size) * cfg.dim;  /* wo */
+    weights_size += n_layers * cfg.dim;                          /* rms_ffn_weight */
+    weights_size += n_layers * cfg.dim * cfg.hidden_dim;         /* w1 */
+    weights_size += n_layers * cfg.hidden_dim * cfg.dim;         /* w2 */
+    weights_size += n_layers * cfg.dim * cfg.hidden_dim;         /* w3 */
+    weights_size += cfg.dim;                                     /* rms_final_weight */
+    /* wcls may be shared with token_embedding_table */
+
+    /* Allocate weights buffer */
+    weights_data = malloc(weights_size * sizeof(float));
+    if (weights_data == nil) {
+        fprint(2, "gguf: failed to allocate %lld bytes for weights\n",
+               weights_size * sizeof(float));
+        gguf_close(&gf);
+        return -1;
+    }
+    t->data = weights_data;
+    t->file_size = weights_size * sizeof(float);
+
+    /* Map weight pointers into the buffer */
+    ptr = weights_data;
+
+    /* token_embedding_table
+     * Try token_embd.weight first, fall back to output.weight for tied embeddings */
+    t->weights.token_embedding_table = ptr;
+    if (load_tensor_by_name(&gf, "token_embd.weight", ptr,
+                            (vlong)cfg.vocab_size * cfg.dim) < 0) {
+        /* Try output.weight as fallback (tied embeddings case) */
+        if (load_tensor_by_name(&gf, "output.weight", ptr,
+                                (vlong)cfg.vocab_size * cfg.dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+    }
+    ptr += (uvlong)cfg.vocab_size * cfg.dim;
+
+    /* rms_att_weight (per layer) */
+    t->weights.rms_att_weight = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.attn_norm.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr, cfg.dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += cfg.dim;
+    }
+
+    /* wq (per layer) */
+    t->weights.wq = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.attn_q.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr,
+                                (vlong)cfg.dim * (cfg.n_heads * head_size)) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        /* De-interleave Q weights (llama.cpp interleaves for RoPE) */
+        deinterleave_qk_weights(ptr, cfg.n_heads, head_size, cfg.dim);
+        ptr += (uvlong)cfg.dim * (cfg.n_heads * head_size);
+    }
+
+    /* wk (per layer) */
+    t->weights.wk = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.attn_k.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr, (vlong)cfg.dim * kv_dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        /* De-interleave K weights (llama.cpp interleaves for RoPE) */
+        deinterleave_qk_weights(ptr, cfg.n_kv_heads, head_size, cfg.dim);
+        ptr += (uvlong)cfg.dim * kv_dim;
+    }
+
+    /* wv (per layer) */
+    t->weights.wv = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.attn_v.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr, (vlong)cfg.dim * kv_dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += (uvlong)cfg.dim * kv_dim;
+    }
+
+    /* wo (per layer) */
+    t->weights.wo = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.attn_output.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr,
+                                (vlong)(cfg.n_heads * head_size) * cfg.dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += (uvlong)(cfg.n_heads * head_size) * cfg.dim;
+    }
+
+    /* rms_ffn_weight (per layer) */
+    t->weights.rms_ffn_weight = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.ffn_norm.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr, cfg.dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += cfg.dim;
+    }
+
+    /* w1 - gate_proj (per layer) */
+    t->weights.w1 = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.ffn_gate.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr,
+                                (vlong)cfg.dim * cfg.hidden_dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += (uvlong)cfg.dim * cfg.hidden_dim;
+    }
+
+    /* w2 - down_proj (per layer) */
+    t->weights.w2 = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.ffn_down.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr,
+                                (vlong)cfg.hidden_dim * cfg.dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += (uvlong)cfg.hidden_dim * cfg.dim;
+    }
+
+    /* w3 - up_proj (per layer) */
+    t->weights.w3 = ptr;
+    for (l = 0; l < cfg.n_layers; l++) {
+        snprint(name, sizeof(name), "blk.%d.ffn_up.weight", l);
+        if (load_tensor_by_name(&gf, name, ptr,
+                                (vlong)cfg.dim * cfg.hidden_dim) < 0) {
+            free(weights_data);
+            gguf_close(&gf);
+            return -1;
+        }
+        ptr += (uvlong)cfg.dim * cfg.hidden_dim;
+    }
+
+    /* rms_final_weight */
+    t->weights.rms_final_weight = ptr;
+    if (load_tensor_by_name(&gf, "output_norm.weight", ptr, cfg.dim) < 0) {
+        free(weights_data);
+        gguf_close(&gf);
+        return -1;
+    }
+    ptr += cfg.dim;
+
+    /* wcls - output projection (may be shared with token_embd) */
+    /* Check if output.weight exists; if not, share with token_embedding_table */
+    GGUFTensorInfo *output_tensor = gguf_find_tensor(&gf, "output.weight");
+    if (output_tensor != nil) {
+        /* Separate output weights - need to allocate more space */
+        /* For now, we'll just share with token_embedding_table */
+        /* TODO: handle non-tied embeddings if needed */
+        t->weights.wcls = t->weights.token_embedding_table;
+    } else {
+        /* Tied embeddings */
+        t->weights.wcls = t->weights.token_embedding_table;
+    }
+
+    gguf_close(&gf);
     return 0;
 }
