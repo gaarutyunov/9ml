@@ -1712,6 +1712,49 @@ static void run_vm_hf_download(void) {
     /* Mark completion */
     qemu_sendln_wait(&hf_vm, "echo hf_done > hf_complete.txt", 2);
 
+    /* Test llmfs pool-download command */
+    printf("\n--- Testing llmfs pool-download ---\n");
+
+    /* Compile llmfs with download modules */
+    printf("Compiling llmfs with download modules...\n");
+    qemu_sendln_wait(&hf_vm, "6c -w -Idownload llmfs.c >[2=1] > llmfs_dl.log; echo llmfs_compiled", 120);
+    qemu_sendln_wait(&hf_vm, "6l -o llmfs llmfs.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfs_dl.log; echo llmfs_linked", 60);
+
+    /* Start llmfs and mount - add debugging */
+    printf("Starting llmfs...\n");
+    qemu_sendln_wait(&hf_vm, "echo 'starting llmfs' >> llmfs_debug.out", 2);
+    qemu_sendln_wait(&hf_vm, "./llmfs -s llm >[2=1] >> llmfs_debug.out &", 5);
+    qemu_sendln_wait(&hf_vm, "sleep 3", 4);
+    qemu_sendln_wait(&hf_vm, "echo 'checking srv' >> llmfs_debug.out; ls /srv >> llmfs_debug.out 2>&1", 5);
+    qemu_sendln_wait(&hf_vm, "mount -c /srv/llm /mnt/llm >[2=1] >> llmfs_debug.out; echo mount_status_$status >> llmfs_debug.out", 5);
+
+    /* Check llmfs is mounted */
+    printf("Checking llmfs is mounted...\n");
+    qemu_sendln_wait(&hf_vm, "ls /mnt/llm > llmfs_ls.out 2>&1; echo ls_done", 5);
+
+    /* Test pool-download command - downloads tokenizer + model from HuggingFace */
+    printf("Testing pool-download (downloading from HuggingFace via llmfs)...\n");
+    qemu_sendln_wait(&hf_vm, "echo 'pool-download tinyllama karpathy/tinyllamas' > /mnt/llm/ctl; echo pool_download_exit_$status > llmfs_download_status.out", 900);
+
+    /* Check pool list */
+    printf("Checking pool list...\n");
+    qemu_sendln_wait(&hf_vm, "cat /mnt/llm/pool/list > llmfs_pool_list.out 2>&1; echo pool_list_done", 5);
+    qemu_sendln_wait(&hf_vm, "cat /mnt/llm/pool/count > llmfs_pool_count.out 2>&1; echo pool_count_done", 5);
+
+    /* Create session and generate with downloaded model */
+    printf("Generating text with downloaded model via llmfs...\n");
+    qemu_sendln_wait(&hf_vm, "cat /mnt/llm/clone > /tmp/sess", 5);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'model tinyllama' > /mnt/llm/$sess/ctl", 5);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'temp 0.0' > /mnt/llm/$sess/ctl", 5);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'steps 20' > /mnt/llm/$sess/ctl", 5);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'Once upon a time' > /mnt/llm/$sess/prompt", 5);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'generate' > /mnt/llm/$sess/ctl", 5);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; cat /mnt/llm/$sess/output > llmfs_dl_output.out", 120);
+    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; cat /mnt/llm/$sess/status > llmfs_dl_status.out", 5);
+
+    /* Mark llmfs download test completion */
+    qemu_sendln_wait(&hf_vm, "echo llmfs_dl_done > llmfs_dl_complete.txt", 2);
+
     /* Shutdown */
     printf("Shutting down internet VM...\n");
     qemu_shutdown(&hf_vm);
@@ -1777,6 +1820,107 @@ static void test_hf_download(void) {
         line = strtok(NULL, "\n");
     }
     free(data_copy);
+    free(data);
+}
+
+/* Helper: Read and print debug file if present */
+static void print_debug_file(const char *filename, const char *label, const char *fallback_msg) {
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, filename, &size);
+    if (data && size > 0) {
+        printf("  %s: %s\n", label, data);
+    } else if (fallback_msg) {
+        printf("  %s: %s\n", label, fallback_msg);
+    }
+    free(data);
+}
+
+/* Test: llmfs pool-download integration */
+static void test_llmfs_download(void) {
+    printf("Testing llmfs_download... ");
+
+    /* Print debug files (even if test did not complete) */
+    int size;
+    char *log = fat_read_file(SHARED_IMAGE, "llmfs_dl.log", &size);
+    if (log && size > 0) {
+        printf("\n  Compile log: %s\n", log);
+    }
+    free(log);
+
+    print_debug_file("llmfs_debug.out", "llmfs debug", NULL);
+    print_debug_file("llmfs_ls.out", "llmfs ls", "(no output - llmfs may not have started)");
+    print_debug_file("llmfs_download_status.out", "Download status", "(no output - pool-download may have hung)");
+
+    /* Check if the llmfs download test completed */
+    char *data = fat_read_file(SHARED_IMAGE, "llmfs_dl_complete.txt", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_download", 0, 1, "llmfs download test not run");
+        printf("SKIP (llmfs download test not run)\n");
+        free(data);
+        return;
+    }
+    free(data);
+
+    /* Check pool list for our model */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_pool_list.out", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_download", 0, 0, "no pool list output");
+        printf("FAIL (no pool list output)\n");
+        free(data);
+        return;
+    }
+
+    if (strstr(data, "tinyllama") == NULL) {
+        add_result("llmfs_download", 0, 0, "model not in pool");
+        printf("FAIL (model not in pool)\n");
+        printf("  Pool list: %s\n", data);
+        free(data);
+        return;
+    }
+    printf("Model found in pool\n");
+    free(data);
+
+    print_debug_file("llmfs_pool_count.out", "Pool count", NULL);
+
+    /* Check generation output */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_dl_output.out", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_download", 0, 0, "no generation output");
+        printf("FAIL (no generation output)\n");
+        free(data);
+        return;
+    }
+
+    if (size < 20) {
+        add_result("llmfs_download", 0, 0, "output too short");
+        printf("FAIL (output too short: %d chars)\n", size);
+        printf("  Output: %s\n", data);
+        free(data);
+        return;
+    }
+
+    printf("  Generation output (%d chars): %.100s%s\n",
+           size, data, size > 100 ? "..." : "");
+    free(data);
+
+    /* Check status */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_dl_status.out", &size);
+    if (!data || size == 0) {
+        add_result("llmfs_download", 0, 0, "no status output");
+        printf("FAIL (no status output)\n");
+        free(data);
+        return;
+    }
+
+    if (strstr(data, "done") != NULL) {
+        printf("  Status: %s", data);
+        add_result("llmfs_download", 1, 0, NULL);
+        printf("PASS\n");
+    } else {
+        add_result("llmfs_download", 0, 0, "generation not complete");
+        printf("FAIL (generation not complete)\n");
+        printf("  Status: %s\n", data);
+    }
     free(data);
 }
 
@@ -2186,6 +2330,7 @@ int main(int argc, char *argv[]) {
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
     if (should_run_test("hf_download")) test_hf_download();
+    if (should_run_test("llmfs_download")) test_llmfs_download();
 
     print_summary();
 

@@ -972,10 +972,12 @@ fswrite(Req *r)
 			char *name, *repo, *revision;
 			HFHub hub;
 			HFModel model;
-			HFFile *files, *binfile;
-			char localpath[256];
-			char tokpath[256];
+			HFFile *files, *binfile, *tokfile, *f;
+			char localpath[256], tokpath[256];
+			static char errbuf[256];
+			char *errmsg = nil;
 			PoolEntry *e;
+			int have_model = 0, have_files = 0;
 
 			/* Parse: pool-download <name> <repo> [revision] */
 			name = args;
@@ -1005,47 +1007,67 @@ fswrite(Req *r)
 
 			/* Get model info */
 			if (hf_get_model_info(&hub, repo, revision, &model) < 0) {
-				static char errbuf[256];
 				snprint(errbuf, sizeof errbuf, "cannot get model info: %s", hub.errmsg);
-				hf_close(&hub);
-				respond(r, errbuf);
-				return;
+				errmsg = errbuf;
+				goto hf_cleanup;
 			}
+			have_model = 1;
 
-			/* Find .bin model file (smallest one for now) */
+			/* Find .bin files */
 			files = hf_find_files(&model, ".bin");
 			if (files == nil) {
-				hf_model_free(&model);
-				hf_close(&hub);
-				respond(r, "no .bin files found in repository");
-				return;
+				errmsg = "no .bin files found in repository";
+				goto hf_cleanup;
+			}
+			have_files = 1;
+
+			/* Find tokenizer.bin and smallest model .bin file */
+			tokfile = nil;
+			binfile = nil;
+			for (f = files; f != nil; f = f->next) {
+				if (strcmp(f->filename, "tokenizer.bin") == 0) {
+					tokfile = f;
+				} else if (binfile == nil || (f->size > 0 && f->size < binfile->size)) {
+					binfile = f;
+				}
 			}
 
-			/* Find smallest .bin file */
-			binfile = files;
-			for (HFFile *f = files; f != nil; f = f->next) {
-				if (f->size > 0 && f->size < binfile->size)
-					binfile = f;
+			if (binfile == nil) {
+				errmsg = "no model .bin files found (only tokenizer.bin)";
+				goto hf_cleanup;
+			}
+
+			/* Download tokenizer if present, otherwise use default */
+			if (tokfile != nil) {
+				snprint(tokpath, sizeof tokpath, "/tmp/hf_%s_tok.bin", name);
+				if (hf_download_file_to(&hub, &model, tokfile, tokpath, nil, nil) < 0) {
+					snprint(errbuf, sizeof errbuf, "tokenizer download failed: %s", hub.errmsg);
+					errmsg = errbuf;
+					goto hf_cleanup;
+				}
+			} else {
+				snprint(tokpath, sizeof tokpath, "tokenizer.bin");
 			}
 
 			/* Download model file */
 			snprint(localpath, sizeof localpath, "/tmp/hf_%s.bin", name);
 			if (hf_download_file_to(&hub, &model, binfile, localpath, nil, nil) < 0) {
-				static char errbuf[256];
-				snprint(errbuf, sizeof errbuf, "download failed: %s", hub.errmsg);
-				hf_files_free(files);
-				hf_model_free(&model);
-				hf_close(&hub);
-				respond(r, errbuf);
-				return;
+				snprint(errbuf, sizeof errbuf, "model download failed: %s", hub.errmsg);
+				errmsg = errbuf;
+				goto hf_cleanup;
 			}
 
-			hf_files_free(files);
-			hf_model_free(&model);
+		hf_cleanup:
+			if (have_files)
+				hf_files_free(files);
+			if (have_model)
+				hf_model_free(&model);
 			hf_close(&hub);
 
-			/* Use default tokenizer (must be present) */
-			snprint(tokpath, sizeof tokpath, "tokenizer.bin");
+			if (errmsg != nil) {
+				respond(r, errmsg);
+				return;
+			}
 
 			/* Load into pool */
 			e = pool_load(&server.pool, name, localpath, tokpath);

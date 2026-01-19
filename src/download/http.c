@@ -233,8 +233,8 @@ http_get_hget(HttpClient *c, char *path, HttpHeader *headers, HttpResponse *resp
         return -1;
     }
 
-    /* Wait for hget to complete (with timeout) */
-    for (int i = 0; i < 60; i++) {
+    /* Wait for hget to complete (with timeout - 600 seconds for large files) */
+    for (int i = 0; i < 600; i++) {
         w = wait();
         if (w != nil) {
             if (w->pid == pid) {
