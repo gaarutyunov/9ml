@@ -232,12 +232,13 @@ echo 'load /path/to/model.bin /path/to/tokenizer.bin' > /mnt/llm/ctl
 
 1. **Install drawterm:**
 ```bash
-# macOS
-brew install drawterm
-
-# Linux (build from source)
+# macOS / Linux (build from source)
 git clone https://github.com/9front/drawterm
-cd drawterm && make
+cd drawterm
+# macOS
+CONF=osx-cocoa make
+# Linux
+make
 ```
 
 2. **Connect to remote server:**
