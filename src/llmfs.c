@@ -3,7 +3,7 @@
  * Plan 9 port of llama2.c with remote inference support
  *
  * File structure:
- *   /ctl        - load/unload model, pool-limit, server status
+ *   /ctl        - server control (load, unload, pool-*, server status)
  *   /model      - model info (read-only)
  *   /pool/      - pool info directory
  *     count     - number of loaded models
@@ -17,6 +17,14 @@
  *     output    - read complete output (blocks until done)
  *     stream    - read streaming output (returns tokens as generated)
  *     status    - current status (idle, generating N/M, done tok/s, error)
+ *
+ * Server /ctl commands:
+ *   load <model> <tokenizer>           - load model (legacy, single-model)
+ *   unload                             - unload model (legacy)
+ *   pool-load <name> <model> <tok>     - load model into pool
+ *   pool-unload <name>                 - unload model from pool
+ *   pool-download <name> <repo> [rev]  - download from HuggingFace and load
+ *   pool-limit <max_models> <max_mem>  - set pool limits
  */
 
 /* Include model implementation first (it includes u.h, libc.h, and thread.h) */
@@ -24,6 +32,10 @@
 
 /* Include pool implementation */
 #include "pool/pool.c"
+
+/* Include download headers (implementations compiled separately) */
+#include "download/http.h"
+#include "download/hfhub.h"
 
 /* Additional headers for 9P server */
 #include <fcall.h>
@@ -951,6 +963,98 @@ fswrite(Req *r)
 				respond(r, "model not found or in use");
 				return;
 			}
+			r->ofcall.count = r->ifcall.count;
+			respond(r, nil);
+			return;
+		}
+		if (strncmp(buf, "pool-download ", 14) == 0) {
+			char *args = buf + 14;
+			char *name, *repo, *revision;
+			HFHub hub;
+			HFModel model;
+			HFFile *files, *binfile;
+			char localpath[256];
+			char tokpath[256];
+			PoolEntry *e;
+
+			/* Parse: pool-download <name> <repo> [revision] */
+			name = args;
+			while (*name == ' ')
+				name++;
+			repo = strchr(name, ' ');
+			if (repo == nil) {
+				respond(r, "usage: pool-download <name> <repo> [revision]");
+				return;
+			}
+			*repo++ = '\0';
+			while (*repo == ' ')
+				repo++;
+
+			/* Optional revision (default: main) */
+			revision = strchr(repo, ' ');
+			if (revision != nil) {
+				*revision++ = '\0';
+				while (*revision == ' ')
+					revision++;
+			} else {
+				revision = "main";
+			}
+
+			/* Initialize HuggingFace client */
+			hf_init(&hub, "/tmp/hf_cache");
+
+			/* Get model info */
+			if (hf_get_model_info(&hub, repo, revision, &model) < 0) {
+				static char errbuf[256];
+				snprint(errbuf, sizeof errbuf, "cannot get model info: %s", hub.errmsg);
+				hf_close(&hub);
+				respond(r, errbuf);
+				return;
+			}
+
+			/* Find .bin model file (smallest one for now) */
+			files = hf_find_files(&model, ".bin");
+			if (files == nil) {
+				hf_model_free(&model);
+				hf_close(&hub);
+				respond(r, "no .bin files found in repository");
+				return;
+			}
+
+			/* Find smallest .bin file */
+			binfile = files;
+			for (HFFile *f = files; f != nil; f = f->next) {
+				if (f->size > 0 && f->size < binfile->size)
+					binfile = f;
+			}
+
+			/* Download model file */
+			snprint(localpath, sizeof localpath, "/tmp/hf_%s.bin", name);
+			if (hf_download_file_to(&hub, &model, binfile, localpath, nil, nil) < 0) {
+				static char errbuf[256];
+				snprint(errbuf, sizeof errbuf, "download failed: %s", hub.errmsg);
+				hf_files_free(files);
+				hf_model_free(&model);
+				hf_close(&hub);
+				respond(r, errbuf);
+				return;
+			}
+
+			hf_files_free(files);
+			hf_model_free(&model);
+			hf_close(&hub);
+
+			/* Use default tokenizer (must be present) */
+			snprint(tokpath, sizeof tokpath, "tokenizer.bin");
+
+			/* Load into pool */
+			e = pool_load(&server.pool, name, localpath, tokpath);
+			if (e == nil) {
+				respond(r, "failed to load downloaded model");
+				return;
+			}
+			pool_release(&server.pool, e);
+
 			r->ofcall.count = r->ifcall.count;
 			respond(r, nil);
 			return;

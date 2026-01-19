@@ -1786,9 +1786,11 @@ static void run_vm_llmfs_local(void) {
     printf("Running llmfs local tests in Plan 9...\n");
     printf("==================================================\n\n");
 
-    /* Compile llmfs - capture errors (SSE SIMD in simd_amd64.s, arch plugins) */
-    run_vm_cmd("6c -w llmfs.c >[2=1] > llmfscmp.log; echo compile_done", 120);
-    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
+    /* Compile llmfs - capture errors (SSE SIMD, arch plugins, download modules) */
+    run_vm_cmd("6c -w -Idownload download/http.c >[2=1] > llmfscmp.log; echo http_done", 30);
+    run_vm_cmd("6c -w -Idownload download/hfhub.c >[2=1] >> llmfscmp.log; echo hfhub_done", 30);
+    run_vm_cmd("6c -w -Idownload llmfs.c >[2=1] >> llmfscmp.log; echo compile_done", 120);
+    run_vm_cmd("6l -o llmfs llmfs.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
@@ -1924,11 +1926,13 @@ static int run_dualvm_llmfs_remote(void) {
     qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c }", 60);
     qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 }", 30);
 
-    /* CPU VM: Compile llmfs (SSE SIMD in simd_amd64.s, arch plugins) */
+    /* CPU VM: Compile llmfs (SSE SIMD, arch plugins, download modules) */
     printf("CPU: Compiling llmfs...\n");
     qemu_sendln_wait(&dualvm.cpu, "6a simd_amd64.s", 30);
-    qemu_sendln_wait(&dualvm.cpu, "6c -w llmfs.c", 120);
-    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6", 60);
+    qemu_sendln_wait(&dualvm.cpu, "6c -w -Idownload download/http.c", 30);
+    qemu_sendln_wait(&dualvm.cpu, "6c -w -Idownload download/hfhub.c", 30);
+    qemu_sendln_wait(&dualvm.cpu, "6c -w -Idownload llmfs.c", 120);
+    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6", 60);
 
     /* CPU VM: Start llmfs server and mount it locally */
     printf("CPU: Starting llmfs server...\n");

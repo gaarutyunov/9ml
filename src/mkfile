@@ -29,9 +29,21 @@ runq: runq.$O $SIMD_ASM
 export: export.$O
 	$LD -o $target $prereq
 
-# llmfs requires lib9p, libthread, and arch plugins
-llmfs: llmfs.$O $SIMD_ASM $ARCH_LIB
+# Download modules for llmfs
+DOWNLOAD_OBJ=download/http.$O download/hfhub.$O
+
+# llmfs requires lib9p, libthread, arch plugins, and download modules
+llmfs: llmfs.$O $SIMD_ASM $ARCH_LIB $DOWNLOAD_OBJ
 	$LD -o $target $prereq
+
+# Compile download modules
+download/http.$O: download/http.c download/http.h
+	$CC $CFLAGS -Idownload download/http.c
+	mv http.$O download/
+
+download/hfhub.$O: download/hfhub.c download/hfhub.h download/http.h
+	$CC $CFLAGS -Idownload download/hfhub.c
+	mv hfhub.$O download/
 
 # C source compilation
 %.$O: %.c
