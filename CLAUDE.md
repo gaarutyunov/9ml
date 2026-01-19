@@ -387,20 +387,15 @@ A 9P file server that exposes LLM inference as a Plan 9 filesystem, enabling dis
 
 ```
 /mnt/llm/
-    ctl             # RW: load/unload model, pool commands, server status
-    model           # R:  model info (dim, layers, vocab, memory)
+    ctl             # RW: load, unload, limit, models commands
+    info            # R:  loaded models, available models, memory usage
     clone           # R:  read to create new session, returns ID
-    pool/           # Model pool directory
-        count       # R:  number of loaded models
-        memory      # R:  total memory used by pool (bytes)
-        list        # R:  comma-separated list of loaded model names
     0/              # Session 0 directory
-        ctl         # RW: temp, topp, seed, steps, generate, reset
-        model       # RW: model name for this session (or "(default)")
+        ctl         # RW: model, temp, topp, seed, steps, generate, reset, close
+        info        # R:  model, config, and status (idle|generating|done|error)
         prompt      # W:  write prompt text
         output      # R:  complete output (blocks until done)
         stream      # R:  streaming output (returns tokens as generated)
-        status      # R:  idle|generating N/M|done tok/s|error msg
     1/              # Session 1...
 ```
 
@@ -420,16 +415,17 @@ In Plan 9:
 # Mount it
 mount /srv/llm /mnt/llm
 
-# Load a model
-echo 'load stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
+# Load a model (name, model file, tokenizer)
+echo 'load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
 
-# Check model info
-cat /mnt/llm/model
+# Check pool info
+cat /mnt/llm/info
 
 # Create a session
 session=`{cat /mnt/llm/clone}
 
-# Configure session
+# Bind model to session and configure
+echo 'model small' > /mnt/llm/$session/ctl
 echo 'temp 0.0' > /mnt/llm/$session/ctl
 echo 'steps 50' > /mnt/llm/$session/ctl
 
@@ -440,8 +436,8 @@ echo 'generate' > /mnt/llm/$session/ctl
 # Read output (blocks until complete)
 cat /mnt/llm/$session/output
 
-# Check status
-cat /mnt/llm/$session/status
+# Check session info (includes status)
+cat /mnt/llm/$session/info
 ```
 
 ### Remote Usage (Distributed Inference)
@@ -450,7 +446,7 @@ On the server machine (cpu):
 ```rc
 # Start llmfs
 ./llmfs -s llm
-echo 'load stories15M.safetensors tokenizer.bin' > /srv/llm/ctl
+echo 'load small stories15M.safetensors tokenizer.bin' > /srv/llm/ctl
 
 # Export over network
 aux/listen1 -tv tcp!*!564 /bin/exportfs -r /srv/llm
@@ -464,15 +460,26 @@ mount /srv/llm /mnt/llm
 
 # Use it as if local
 cat /mnt/llm/clone
+echo 'model small' > /mnt/llm/0/ctl
 echo 'Once upon a time' > /mnt/llm/0/prompt
 echo generate > /mnt/llm/0/ctl
 cat /mnt/llm/0/output
 ```
 
+### Server Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `load <name> <model> <tokenizer>` | Load model into pool with given name |
+| `unload <name>` | Unload model from pool (fails if in use) |
+| `limit <max_models> <max_memory>` | Set pool limits (models and bytes) |
+| `models <path>` | Set directory to scan for available models |
+
 ### Session Control Commands
 
 | Command | Description |
 |---------|-------------|
+| `model <name>` | Bind session to named model |
 | `temp <float>` | Set temperature (0.0 = greedy) |
 | `topp <float>` | Set top-p sampling (0.0-1.0) |
 | `seed <int>` | Set random seed |
@@ -481,39 +488,51 @@ cat /mnt/llm/0/output
 | `reset` | Reset session state |
 | `close` | Close session |
 
-### Server Control Commands
+### Info File Format
 
-| Command | Description |
-|---------|-------------|
-| `load <model> <tokenizer>` | Load default model and tokenizer |
-| `unload` | Unload default model |
-| `pool-load <name> <model> <tokenizer>` | Load model into pool with given name |
-| `pool-unload <name>` | Unload model from pool (fails if in use) |
-| `pool-limit <max_models> <max_memory>` | Set pool limits (models and bytes) |
+The `/mnt/llm/info` file shows pool status:
+```
+loaded:
+  small: 60.5MB (0 refs)
+  large: 13.5GB (2 refs)
+available:
+  tinyllama.gguf
+  mistral-7b.safetensors
+memory: 13.56GB / 16.00GB
+limit: 8 models
+```
+
+The `/mnt/llm/N/info` file shows session status:
+```
+model: small
+temp: 0.8
+topp: 0.9
+seed: 12345
+steps: 256
+status: done 202.50 tok/s
+```
 
 ### Multi-Model Usage
 
 ```rc
 # Load multiple models into the pool
-echo 'pool-load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
-echo 'pool-load large llama2-7b.gguf tokenizer.bin' > /mnt/llm/ctl
+echo 'load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
+echo 'load large llama2-7b.gguf tokenizer.bin' > /mnt/llm/ctl
 
 # Check pool status
-cat /mnt/llm/pool/count    # "2"
-cat /mnt/llm/pool/list     # "small,large"
-cat /mnt/llm/pool/memory   # Total memory used
+cat /mnt/llm/info
 
 # Create session and bind to specific model
 session=`{cat /mnt/llm/clone}
-echo 'large' > /mnt/llm/$session/model
+echo 'model large' > /mnt/llm/$session/ctl
 
 # Generate using bound model
 echo 'Once upon a time' > /mnt/llm/$session/prompt
 echo 'generate' > /mnt/llm/$session/ctl
 cat /mnt/llm/$session/output
 
-# Check which model is bound
-cat /mnt/llm/$session/model    # "large"
+# Check session info (includes bound model)
+cat /mnt/llm/$session/info
 ```
 
 The pool uses LRU eviction: when memory or model count limits are reached, the least recently used models with zero references are unloaded. Sessions hold references to their bound models, preventing eviction while in use.

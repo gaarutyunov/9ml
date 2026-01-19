@@ -1610,18 +1610,20 @@ static void run_vm_llmfs_local(void) {
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
+    run_vm_cmd("sleep 2", 3);  /* Give llmfs time to initialize */
     run_vm_cmd("mount -c /srv/llm /mnt/llm", 3);
 
-    /* Load model */
-    run_vm_cmd("echo 'load stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl", 5);
+    /* Load model into pool with name "small" */
+    run_vm_cmd("echo 'load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl; echo load_done", 60);
 
-    /* Check model info */
-    run_vm_cmd("cat /mnt/llm/model > llmfs_model.out", 3);
+    /* Check pool info */
+    run_vm_cmd("cat /mnt/llm/info > llmfs_info.out", 3);
 
     /* Create session and read session id */
     run_vm_cmd("cat /mnt/llm/clone > llmfs_session.out", 3);
 
-    /* Configure and run generation - use deterministic settings */
+    /* Bind model to session and configure */
+    run_vm_cmd("echo 'model small' > /mnt/llm/0/ctl", 2);
     run_vm_cmd("echo 'temp 0.0' > /mnt/llm/0/ctl", 2);
     run_vm_cmd("echo 'steps 20' > /mnt/llm/0/ctl", 2);
     run_vm_cmd("echo 'seed 42' > /mnt/llm/0/ctl", 2);
@@ -1631,8 +1633,8 @@ static void run_vm_llmfs_local(void) {
     /* Wait for generation and read output */
     run_vm_cmd("cat /mnt/llm/0/output > llmfs_output.out", 120);
 
-    /* Read status */
-    run_vm_cmd("cat /mnt/llm/0/status > llmfs_status.out", 3);
+    /* Read session info (includes status) */
+    run_vm_cmd("cat /mnt/llm/0/info > llmfs_status.out", 3);
 
     /* Mark completion */
     run_vm_cmd("echo llmfs_done > llmfs_complete.txt", 2);
@@ -1666,19 +1668,19 @@ static void test_llmfs_local(void) {
     }
     free(data);
 
-    /* Check model output */
-    data = fat_read_file(SHARED_IMAGE, "llmfs_model.out", &size);
+    /* Check pool info output */
+    data = fat_read_file(SHARED_IMAGE, "llmfs_info.out", &size);
     if (!data || size == 0) {
-        add_result("llmfs_local", 0, 0, "no model output");
-        printf("FAIL (no model output)\n");
+        add_result("llmfs_local", 0, 0, "no pool info output");
+        printf("FAIL (no pool info output)\n");
         free(data);
         return;
     }
 
-    /* Verify model info contains expected fields */
-    if (strstr(data, "dim") == NULL || strstr(data, "vocab_size") == NULL) {
-        add_result("llmfs_local", 0, 0, "model info incomplete");
-        printf("FAIL (model info incomplete)\n");
+    /* Verify pool info contains loaded model */
+    if (strstr(data, "loaded:") == NULL || strstr(data, "small:") == NULL) {
+        add_result("llmfs_local", 0, 0, "pool info incomplete");
+        printf("FAIL (pool info incomplete: %s)\n", data);
         free(data);
         return;
     }
@@ -1705,11 +1707,11 @@ static void test_llmfs_local(void) {
     add_result("llmfs_local", 1, 0, NULL);
     free(data);
 
-    /* Check status */
+    /* Check session info (includes status) */
     data = fat_read_file(SHARED_IMAGE, "llmfs_status.out", &size);
-    if (data && strstr(data, "done") != NULL) {
-        /* Status shows completion with tok/s */
-        printf("  Status: %s", data);
+    if (data && strstr(data, "status: done") != NULL) {
+        /* Session info shows completion with tok/s */
+        printf("  Session info: %s", data);
     }
     free(data);
 }
@@ -1758,9 +1760,9 @@ static int run_dualvm_llmfs_remote(void) {
     qemu_sendln_wait(&dualvm.cpu, "./llmfs -s llm &", 10);
     qemu_sendln_wait(&dualvm.cpu, "mount /srv/llm /mnt/llm", 10);
 
-    /* CPU VM: Load model (via local mount) */
+    /* CPU VM: Load model into pool with name "small" (via local mount) */
     printf("CPU: Loading model...\n");
-    qemu_sendln_wait(&dualvm.cpu, "echo 'load stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl", 10);
+    qemu_sendln_wait(&dualvm.cpu, "echo 'load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl", 10);
 
     /* CPU VM: Export mounted llmfs tree via 9P over TCP */
     printf("CPU: Starting 9P export on tcp!*!564...\n");
@@ -1783,6 +1785,7 @@ static int run_dualvm_llmfs_remote(void) {
     /* Terminal VM: Create session and generate (operations go over 9P network) */
     printf("Terminal: Creating session and generating (via 9P)...\n");
     qemu_sendln_wait(&dualvm.terminal, "cat /mnt/llm/clone", 10);  /* Creates session 0 */
+    qemu_sendln_wait(&dualvm.terminal, "echo 'model small' > /mnt/llm/0/ctl", 5);  /* Bind model to session */
     qemu_sendln_wait(&dualvm.terminal, "echo 'temp 0.0' > /mnt/llm/0/ctl", 5);
     qemu_sendln_wait(&dualvm.terminal, "echo 'steps 20' > /mnt/llm/0/ctl", 5);
     qemu_sendln_wait(&dualvm.terminal, "echo 'seed 42' > /mnt/llm/0/ctl", 5);
@@ -1795,9 +1798,9 @@ static int run_dualvm_llmfs_remote(void) {
 
     /* CPU VM saves the results to shared disk (CPU has exclusive FAT access) */
     printf("CPU: Saving remote test results to shared disk...\n");
-    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/model > /mnt/host/llmfs_remote_model.out", 10);
+    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/info > /mnt/host/llmfs_remote_info.out", 10);
     qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/0/output > /mnt/host/llmfs_remote_output.out", 10);
-    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/0/status > /mnt/host/llmfs_remote_status.out", 10);
+    qemu_sendln_wait(&dualvm.cpu, "cat /mnt/llm/0/info > /mnt/host/llmfs_remote_status.out", 10);
     qemu_sendln_wait(&dualvm.cpu, "echo remote_done > /mnt/host/llmfs_remote_complete.txt", 5);
     qemu_sleep(2);  /* Give time for FAT writes to complete */
 
@@ -1865,10 +1868,10 @@ static void test_llmfs_remote(void) {
     free(data);
     free(local_data);
 
-    /* Check status */
+    /* Check session info (includes status) */
     data = fat_read_file(SHARED_IMAGE, "llmfs_remote_status.out", &size);
-    if (data && strstr(data, "done") != NULL) {
-        printf("  Status: %s", data);
+    if (data && strstr(data, "status: done") != NULL) {
+        printf("  Session info: %s", data);
     }
     free(data);
 }

@@ -618,10 +618,18 @@ st_load_transformer(char *path, void *transformer)
         float *wcls;
     } TWeights;
 
+    /* RunState has 12 float pointers for activation buffers */
+    typedef struct {
+        float *x, *xb, *xb2, *hb, *hb2;
+        float *q, *k, *v;
+        float *att, *logits;
+        float *key_cache, *value_cache;
+    } TRunState;
+
     typedef struct {
         TConfig config;
         TWeights weights;
-        void *state;
+        TRunState state;     /* Full struct, not pointer! */
         void *arch;
         float *data;
         vlong file_size;

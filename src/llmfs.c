@@ -3,27 +3,21 @@
  * Plan 9 port of llama2.c with remote inference support
  *
  * File structure:
- *   /ctl        - server control (load, unload, pool-*, server status)
- *   /model      - model info (read-only)
- *   /pool/      - pool info directory
- *     count     - number of loaded models
- *     memory    - total memory used
- *     list      - list of loaded model names
+ *   /ctl        - server control (load, unload, limit, models)
+ *   /info       - pool info (loaded models, available models, memory)
  *   /clone      - read to create new session, returns session id
  *   /N/         - session N directory
- *     ctl       - session control (temp, topp, seed, steps, generate, reset, model)
- *     model     - current model name (read/write)
+ *     ctl       - session control (model, temp, topp, seed, steps, generate, reset, close)
+ *     info      - session info (model, config, status)
  *     prompt    - write prompt text here
  *     output    - read complete output (blocks until done)
  *     stream    - read streaming output (returns tokens as generated)
- *     status    - current status (idle, generating N/M, done tok/s, error)
  *
  * Server /ctl commands:
- *   load <model> <tokenizer>           - load model (legacy, single-model)
- *   unload                             - unload model (legacy)
- *   pool-load <name> <model> <tok>     - load model into pool
- *   pool-unload <name>                 - unload model from pool
- *   pool-limit <max_models> <max_mem>  - set pool limits
+ *   load <name> <model> <tokenizer>   - load model into pool with given name
+ *   unload <name>                     - unload model from pool (fails if in use)
+ *   limit <max_models> <max_memory>   - set pool limits
+ *   models <path>                     - set models directory for available scan
  */
 
 /* Include model implementation first (it includes u.h, libc.h, and thread.h) */
@@ -55,19 +49,14 @@ enum {
 enum {
 	Qroot,
 	Qctl,
-	Qmodel,
+	Qinfo,          /* pool info (loaded, available, memory, limits) */
 	Qclone,
-	Qpool,          /* pool/ directory */
-	Qpoolcount,     /* pool/count */
-	Qpoolmemory,    /* pool/memory */
-	Qpoollist,      /* pool/list */
 	Qsession,
 	Qsessctl,
-	Qsessmodel,     /* session model binding */
+	Qsessinfo,      /* session info (model, config, status) */
 	Qprompt,
 	Qoutput,
-	Qstream,
-	Qstatus
+	Qstream
 };
 
 /* Session structure */
@@ -117,13 +106,8 @@ struct Session {
 /* Server state */
 typedef struct LLMServer LLMServer;
 struct LLMServer {
-	int loaded;                     /* Backward compat: 1 if default model loaded */
-	char *modelpath;                /* Default model path */
-	char *tokenizerpath;            /* Default tokenizer path */
-	Transformer transformer;        /* Default model (for backward compat) */
-	Tokenizer tokenizer;            /* Default tokenizer */
 	ModelPool pool;                 /* Model pool for multi-model support */
-	PoolEntry *defaultmodel;        /* Default model entry in pool */
+	char *models_dir;               /* Directory to scan for available models */
 	Session sessions[MAX_SESSIONS];
 	int nsessions;
 	QLock lk;
@@ -154,7 +138,7 @@ mkqid(Qid *qid, int type, int sessid)
 {
 	qid->path = QPATH(type, sessid);
 	qid->vers = 0;
-	qid->type = (type == Qroot || type == Qsession || type == Qpool) ? QTDIR : QTFILE;
+	qid->type = (type == Qroot || type == Qsession) ? QTDIR : QTFILE;
 }
 
 static void
@@ -170,15 +154,13 @@ mkdir(Dir *d, int type, int sessid, char *name)
 	d->gid = estrdup9p("llm");
 	d->muid = estrdup9p("llm");
 
-	/* Make prompt write-only, output/stream/model/status read-only */
+	/* Set file permissions */
 	if (type == Qprompt)
-		d->mode = 0222;
-	else if (type == Qoutput || type == Qstream || type == Qmodel || type == Qstatus)
-		d->mode = 0444;
-	else if (type == Qpoolcount || type == Qpoolmemory || type == Qpoollist)
-		d->mode = 0444;  /* Pool info is read-only */
-	else if (type == Qctl || type == Qsessctl || type == Qclone || type == Qsessmodel)
-		d->mode = 0666;  /* Session model binding is read-write */
+		d->mode = 0222;  /* Write-only */
+	else if (type == Qoutput || type == Qstream || type == Qinfo || type == Qsessinfo)
+		d->mode = 0444;  /* Read-only */
+	else if (type == Qctl || type == Qsessctl || type == Qclone)
+		d->mode = 0666;  /* Read-write */
 }
 
 /* Session management */
@@ -319,21 +301,17 @@ genproc(void *arg)
 	Transformer *transformer;
 	Tokenizer *tokenizer;
 
-	/* Get model to use: session-bound model or default */
-	if (s->model != nil) {
-		transformer = (Transformer *)s->model->transformer;
-		tokenizer = (Tokenizer *)s->model->tokenizer;
-	} else if (server.loaded) {
-		transformer = &server.transformer;
-		tokenizer = &server.tokenizer;
-	} else {
+	/* Get model to use: session must have a bound model */
+	if (s->model == nil) {
 		qlock(&s->lk);
 		s->state = SESS_ERROR;
-		strcpy(s->errmsg, "no model loaded");
+		strcpy(s->errmsg, "no model bound to session");
 		qunlock(&s->lk);
 		sendp(s->tokenchan, nil);
 		return;
 	}
+	transformer = (Transformer *)s->model->transformer;
+	tokenizer = (Tokenizer *)s->model->tokenizer;
 
 	/* Encode prompt */
 	char *prompt = s->prompt;
@@ -413,44 +391,19 @@ genproc(void *arg)
 	free(prompt_tokens);
 }
 
-/* Server operations */
-static void
-loadmodel(char *modelpath, char *tokpath)
+/* Helper: format size in human-readable form */
+static char*
+format_size(uvlong bytes, char *buf, int buflen)
 {
-	qlock(&server.lk);
-
-	if (server.loaded) {
-		free_tokenizer(&server.tokenizer);
-		free_transformer(&server.transformer);
-		free(server.modelpath);
-		free(server.tokenizerpath);
-		server.loaded = 0;
-	}
-
-	build_transformer(&server.transformer, modelpath);
-	build_tokenizer(&server.tokenizer, tokpath, server.transformer.config.vocab_size);
-
-	server.modelpath = estrdup9p(modelpath);
-	server.tokenizerpath = estrdup9p(tokpath);
-	server.loaded = 1;
-
-	qunlock(&server.lk);
-}
-
-static void
-unloadmodel(void)
-{
-	qlock(&server.lk);
-	if (server.loaded) {
-		free_tokenizer(&server.tokenizer);
-		free_transformer(&server.transformer);
-		free(server.modelpath);
-		free(server.tokenizerpath);
-		server.modelpath = nil;
-		server.tokenizerpath = nil;
-		server.loaded = 0;
-	}
-	qunlock(&server.lk);
+	if (bytes >= 1024ULL * 1024 * 1024)
+		snprint(buf, buflen, "%.2fGB", (double)bytes / (1024.0 * 1024 * 1024));
+	else if (bytes >= 1024ULL * 1024)
+		snprint(buf, buflen, "%.2fMB", (double)bytes / (1024.0 * 1024));
+	else if (bytes >= 1024)
+		snprint(buf, buflen, "%.2fKB", (double)bytes / 1024.0);
+	else
+		snprint(buf, buflen, "%lludB", bytes);
+	return buf;
 }
 
 /* 9P operations */
@@ -480,42 +433,18 @@ fswalk1(Fid *fid, char *name, Qid *qid)
 			mkqid(qid, Qctl, 0);
 			return nil;
 		}
-		if (strcmp(name, "model") == 0) {
-			mkqid(qid, Qmodel, 0);
+		if (strcmp(name, "info") == 0) {
+			mkqid(qid, Qinfo, 0);
 			return nil;
 		}
 		if (strcmp(name, "clone") == 0) {
 			mkqid(qid, Qclone, 0);
 			return nil;
 		}
-		if (strcmp(name, "pool") == 0) {
-			mkqid(qid, Qpool, 0);
-			return nil;
-		}
 		/* Check for session directory */
 		i = atoi(name);
 		if (i >= 0 && i < server.nsessions && server.sessions[i].inuse) {
 			mkqid(qid, Qsession, i);
-			return nil;
-		}
-		return "file not found";
-	}
-
-	if (type == Qpool) {
-		if (strcmp(name, "..") == 0) {
-			mkqid(qid, Qroot, 0);
-			return nil;
-		}
-		if (strcmp(name, "count") == 0) {
-			mkqid(qid, Qpoolcount, 0);
-			return nil;
-		}
-		if (strcmp(name, "memory") == 0) {
-			mkqid(qid, Qpoolmemory, 0);
-			return nil;
-		}
-		if (strcmp(name, "list") == 0) {
-			mkqid(qid, Qpoollist, 0);
 			return nil;
 		}
 		return "file not found";
@@ -530,8 +459,8 @@ fswalk1(Fid *fid, char *name, Qid *qid)
 			mkqid(qid, Qsessctl, sessid);
 			return nil;
 		}
-		if (strcmp(name, "model") == 0) {
-			mkqid(qid, Qsessmodel, sessid);
+		if (strcmp(name, "info") == 0) {
+			mkqid(qid, Qsessinfo, sessid);
 			return nil;
 		}
 		if (strcmp(name, "prompt") == 0) {
@@ -544,10 +473,6 @@ fswalk1(Fid *fid, char *name, Qid *qid)
 		}
 		if (strcmp(name, "stream") == 0) {
 			mkqid(qid, Qstream, sessid);
-			return nil;
-		}
-		if (strcmp(name, "status") == 0) {
-			mkqid(qid, Qstatus, sessid);
 			return nil;
 		}
 		return "file not found";
@@ -580,16 +505,13 @@ rootgen(int n, Dir *d, void *aux)
 		mkdir(d, Qctl, 0, "ctl");
 		return 0;
 	case 1:
-		mkdir(d, Qmodel, 0, "model");
+		mkdir(d, Qinfo, 0, "info");
 		return 0;
 	case 2:
 		mkdir(d, Qclone, 0, "clone");
 		return 0;
-	case 3:
-		mkdir(d, Qpool, 0, "pool");
-		return 0;
 	default:
-		n -= 4;
+		n -= 3;
 		if (n >= 0 && n < server.nsessions && server.sessions[n].inuse) {
 			char name[16];
 			sprint(name, "%d", n);
@@ -610,7 +532,7 @@ sessiongen(int n, Dir *d, void *aux)
 		mkdir(d, Qsessctl, sessid, "ctl");
 		return 0;
 	case 1:
-		mkdir(d, Qsessmodel, sessid, "model");
+		mkdir(d, Qsessinfo, sessid, "info");
 		return 0;
 	case 2:
 		mkdir(d, Qprompt, sessid, "prompt");
@@ -621,32 +543,48 @@ sessiongen(int n, Dir *d, void *aux)
 	case 4:
 		mkdir(d, Qstream, sessid, "stream");
 		return 0;
-	case 5:
-		mkdir(d, Qstatus, sessid, "status");
-		return 0;
 	default:
 		return -1;
 	}
 }
 
-static int
-poolgen(int n, Dir *d, void *aux)
+/* Helper: scan directory for model files (.safetensors, .gguf) */
+static char*
+scan_available_models(char *dir, char *buf, int buflen)
 {
-	USED(aux);
+	int fd;
+	Dir *d;
+	int n, i;
+	char *p = buf;
+	char *end = buf + buflen;
+	int count = 0;
 
-	switch (n) {
-	case 0:
-		mkdir(d, Qpoolcount, 0, "count");
-		return 0;
-	case 1:
-		mkdir(d, Qpoolmemory, 0, "memory");
-		return 0;
-	case 2:
-		mkdir(d, Qpoollist, 0, "list");
-		return 0;
-	default:
-		return -1;
+	if (dir == nil || dir[0] == '\0')
+		dir = ".";
+
+	fd = open(dir, OREAD);
+	if (fd < 0)
+		return buf;
+
+	while ((n = dirread(fd, &d)) > 0) {
+		for (i = 0; i < n; i++) {
+			char *name = d[i].name;
+			int namelen = strlen(name);
+			/* Check for .safetensors or .gguf extension */
+			if ((namelen > 12 && strcmp(name + namelen - 12, ".safetensors") == 0) ||
+			    (namelen > 5 && strcmp(name + namelen - 5, ".gguf") == 0)) {
+				if (p + namelen + 4 < end) {
+					if (count > 0)
+						p += snprint(p, end - p, "\n");
+					p += snprint(p, end - p, "  %s", name);
+					count++;
+				}
+			}
+		}
+		free(d);
 	}
+	close(fd);
+	return buf;
 }
 
 static void
@@ -655,9 +593,11 @@ fsread(Req *r)
 	int type = QTYPE(r->fid->qid.path);
 	int sessid = QSESS(r->fid->qid.path);
 	Session *s;
-	char buf[4096];
+	char buf[8192];
+	char sizebuf[32], maxbuf[32];
 	int n;
 	char *tok;
+	PoolEntry *e;
 
 	switch (type) {
 	case Qroot:
@@ -671,33 +611,48 @@ fsread(Req *r)
 		return;
 
 	case Qctl:
-		n = 0;
-		if (server.loaded)
-			n = snprint(buf, sizeof(buf), "loaded %s %s\n", server.modelpath, server.tokenizerpath);
-		else
-			n = snprint(buf, sizeof(buf), "unloaded\n");
+		/* Return available commands as help text */
+		n = snprint(buf, sizeof(buf),
+			"load <name> <model> <tokenizer>\n"
+			"unload <name>\n"
+			"limit <max_models> <max_memory>\n"
+			"models <path>\n");
 		readstr(r, buf);
 		respond(r, nil);
 		return;
 
-	case Qmodel:
-		if (!server.loaded) {
-			respond(r, "model not loaded");
-			return;
+	case Qinfo:
+		/* Format: loaded models, available models, memory usage, limits */
+		n = snprint(buf, sizeof(buf), "loaded:\n");
+
+		qlock(&server.pool.lk);
+		if (server.pool.count == 0) {
+			n += snprint(buf + n, sizeof(buf) - n, "  (none)\n");
+		} else {
+			for (e = server.pool.head; e != nil; e = e->next) {
+				format_size(e->memory, sizebuf, sizeof(sizebuf));
+				n += snprint(buf + n, sizeof(buf) - n,
+					"  %s: %s (%d refs)\n",
+					e->name, sizebuf, e->refcount);
+			}
 		}
-		{
-			Config *c = &server.transformer.config;
-			n = snprint(buf, sizeof(buf),
-				"dim %d\n"
-				"hidden_dim %d\n"
-				"n_layers %d\n"
-				"n_heads %d\n"
-				"n_kv_heads %d\n"
-				"vocab_size %d\n"
-				"seq_len %d\n",
-				c->dim, c->hidden_dim, c->n_layers,
-				c->n_heads, c->n_kv_heads, c->vocab_size, c->seq_len);
-		}
+
+		/* Available models */
+		n += snprint(buf + n, sizeof(buf) - n, "available:\n");
+		scan_available_models(server.models_dir, buf + n, sizeof(buf) - n);
+		n = strlen(buf);
+		if (buf[n-1] != '\n')
+			n += snprint(buf + n, sizeof(buf) - n, "\n");
+
+		/* Memory usage */
+		format_size(server.pool.total_memory, sizebuf, sizeof(sizebuf));
+		format_size(server.pool.max_memory, maxbuf, sizeof(maxbuf));
+		n += snprint(buf + n, sizeof(buf) - n,
+			"memory: %s / %s\n"
+			"limit: %d models\n",
+			sizebuf, maxbuf, server.pool.max_models);
+		qunlock(&server.pool.lk);
+
 		readstr(r, buf);
 		respond(r, nil);
 		return;
@@ -714,39 +669,54 @@ fsread(Req *r)
 		return;
 
 	case Qsessctl:
-		s = session_get(sessid);
-		if (s == nil) {
-			respond(r, "session not found");
-			return;
-		}
-		qlock(&s->lk);
+		/* Return available session commands as help text */
 		n = snprint(buf, sizeof(buf),
-			"temp %g\ntopp %g\nseed %llud\nsteps %d\n",
-			s->temp, s->topp, s->seed, s->steps);
-		qunlock(&s->lk);
+			"model <name>\n"
+			"temp <float>\n"
+			"topp <float>\n"
+			"seed <int>\n"
+			"steps <int>\n"
+			"generate\n"
+			"reset\n"
+			"close\n");
 		readstr(r, buf);
 		respond(r, nil);
 		return;
 
-	case Qstatus:
+	case Qsessinfo:
 		s = session_get(sessid);
 		if (s == nil) {
 			respond(r, "session not found");
 			return;
 		}
 		qlock(&s->lk);
+		/* Model name */
+		if (s->modelname[0] != '\0')
+			n = snprint(buf, sizeof(buf), "model: %s\n", s->modelname);
+		else
+			n = snprint(buf, sizeof(buf), "model: (none)\n");
+
+		/* Config */
+		n += snprint(buf + n, sizeof(buf) - n,
+			"temp: %g\n"
+			"topp: %g\n"
+			"seed: %llud\n"
+			"steps: %d\n",
+			s->temp, s->topp, s->seed, s->steps);
+
+		/* Status */
 		switch (s->state) {
 		case SESS_IDLE:
-			n = snprint(buf, sizeof(buf), "idle\n");
+			n += snprint(buf + n, sizeof(buf) - n, "status: idle\n");
 			break;
 		case SESS_GENERATING:
-			n = snprint(buf, sizeof(buf), "generating %d/%d\n", s->genpos, s->steps);
+			n += snprint(buf + n, sizeof(buf) - n, "status: generating %d/%d\n", s->genpos, s->steps);
 			break;
 		case SESS_DONE:
-			n = snprint(buf, sizeof(buf), "done %.2f tok/s\n", s->toksec);
+			n += snprint(buf + n, sizeof(buf) - n, "status: done %.2f tok/s\n", s->toksec);
 			break;
 		case SESS_ERROR:
-			n = snprint(buf, sizeof(buf), "error %s\n", s->errmsg);
+			n += snprint(buf + n, sizeof(buf) - n, "status: error %s\n", s->errmsg);
 			break;
 		}
 		qunlock(&s->lk);
@@ -817,52 +787,6 @@ fsread(Req *r)
 		respond(r, "prompt is write-only");
 		return;
 
-	case Qpool:
-		dirread9p(r, poolgen, nil);
-		respond(r, nil);
-		return;
-
-	case Qpoolcount:
-		n = snprint(buf, sizeof(buf), "%d\n", pool_count(&server.pool));
-		readstr(r, buf);
-		respond(r, nil);
-		return;
-
-	case Qpoolmemory:
-		n = snprint(buf, sizeof(buf), "%llud\n", pool_memory(&server.pool));
-		readstr(r, buf);
-		respond(r, nil);
-		return;
-
-	case Qpoollist:
-		{
-			char *list = pool_list(&server.pool);
-			if (list == nil) {
-				respond(r, "out of memory");
-				return;
-			}
-			readstr(r, list);
-			free(list);
-			respond(r, nil);
-			return;
-		}
-
-	case Qsessmodel:
-		s = session_get(sessid);
-		if (s == nil) {
-			respond(r, "session not found");
-			return;
-		}
-		qlock(&s->lk);
-		if (s->modelname[0] != '\0')
-			n = snprint(buf, sizeof(buf), "%s\n", s->modelname);
-		else
-			n = snprint(buf, sizeof(buf), "(default)\n");
-		qunlock(&s->lk);
-		readstr(r, buf);
-		respond(r, nil);
-		return;
-
 	default:
 		respond(r, "unknown file");
 		return;
@@ -890,42 +814,16 @@ fswrite(Req *r)
 
 	switch (type) {
 	case Qctl:
+		/* load <name> <model> <tokenizer> */
 		if (strncmp(buf, "load ", 5) == 0) {
 			char *args = buf + 5;
-			char *modelpath, *tokpath;
-
-			/* Parse: load <modelpath> <tokenizerpath> */
-			modelpath = args;
-			tokpath = strchr(args, ' ');
-			if (tokpath == nil) {
-				respond(r, "usage: load <model> <tokenizer>");
-				return;
-			}
-			*tokpath++ = '\0';
-			while (*tokpath == ' ')
-				tokpath++;
-
-			loadmodel(modelpath, tokpath);
-			r->ofcall.count = r->ifcall.count;
-			respond(r, nil);
-			return;
-		}
-		if (strcmp(buf, "unload") == 0) {
-			unloadmodel();
-			r->ofcall.count = r->ifcall.count;
-			respond(r, nil);
-			return;
-		}
-		/* Pool commands */
-		if (strncmp(buf, "pool-load ", 10) == 0) {
-			char *args = buf + 10;
 			char *name, *modelpath, *tokpath;
 
-			/* Parse: pool-load <name> <modelpath> <tokenizerpath> */
+			/* Parse: load <name> <modelpath> <tokenizerpath> */
 			name = args;
 			modelpath = strchr(args, ' ');
 			if (modelpath == nil) {
-				respond(r, "usage: pool-load <name> <model> <tokenizer>");
+				respond(r, "usage: load <name> <model> <tokenizer>");
 				return;
 			}
 			*modelpath++ = '\0';
@@ -933,7 +831,7 @@ fswrite(Req *r)
 				modelpath++;
 			tokpath = strchr(modelpath, ' ');
 			if (tokpath == nil) {
-				respond(r, "usage: pool-load <name> <model> <tokenizer>");
+				respond(r, "usage: load <name> <model> <tokenizer>");
 				return;
 			}
 			*tokpath++ = '\0';
@@ -950,10 +848,15 @@ fswrite(Req *r)
 			respond(r, nil);
 			return;
 		}
-		if (strncmp(buf, "pool-unload ", 12) == 0) {
-			char *name = buf + 12;
+		/* unload <name> */
+		if (strncmp(buf, "unload ", 7) == 0) {
+			char *name = buf + 7;
 			while (*name == ' ')
 				name++;
+			if (name[0] == '\0') {
+				respond(r, "usage: unload <name>");
+				return;
+			}
 			if (pool_unload(&server.pool, name) != 0) {
 				respond(r, "model not found or in use");
 				return;
@@ -962,16 +865,17 @@ fswrite(Req *r)
 			respond(r, nil);
 			return;
 		}
-		if (strncmp(buf, "pool-limit ", 11) == 0) {
-			char *args = buf + 11;
+		/* limit <max_models> <max_memory> */
+		if (strncmp(buf, "limit ", 6) == 0) {
+			char *args = buf + 6;
 			int max_models;
 			uvlong max_memory;
 
-			/* Parse: pool-limit <max_models> <max_memory> */
+			/* Parse: limit <max_models> <max_memory> */
 			max_models = atoi(args);
 			char *memarg = strchr(args, ' ');
 			if (memarg == nil) {
-				respond(r, "usage: pool-limit <max_models> <max_memory_bytes>");
+				respond(r, "usage: limit <max_models> <max_memory_bytes>");
 				return;
 			}
 			max_memory = strtoull(memarg + 1, nil, 10);
@@ -980,6 +884,21 @@ fswrite(Req *r)
 			server.pool.max_models = max_models;
 			server.pool.max_memory = max_memory;
 			qunlock(&server.pool.lk);
+
+			r->ofcall.count = r->ifcall.count;
+			respond(r, nil);
+			return;
+		}
+		/* models <path> */
+		if (strncmp(buf, "models ", 7) == 0) {
+			char *path = buf + 7;
+			while (*path == ' ')
+				path++;
+
+			qlock(&server.lk);
+			free(server.models_dir);
+			server.models_dir = strdup(path);
+			qunlock(&server.lk);
 
 			r->ofcall.count = r->ifcall.count;
 			respond(r, nil);
@@ -995,6 +914,41 @@ fswrite(Req *r)
 			return;
 		}
 
+		/* model <name> - bind session to a model */
+		if (strncmp(buf, "model ", 6) == 0) {
+			char *name = buf + 6;
+			while (*name == ' ')
+				name++;
+
+			qlock(&s->lk);
+			if (s->state == SESS_GENERATING) {
+				qunlock(&s->lk);
+				respond(r, "cannot change model while generating");
+				return;
+			}
+			/* Release previous model if bound */
+			if (s->model != nil) {
+				pool_release(&server.pool, s->model);
+				s->model = nil;
+				s->modelname[0] = '\0';
+			}
+			/* Bind to new model */
+			if (name[0] != '\0') {
+				PoolEntry *e = pool_get(&server.pool, name);
+				if (e == nil) {
+					qunlock(&s->lk);
+					respond(r, "model not found in pool");
+					return;
+				}
+				s->model = e;
+				strncpy(s->modelname, name, sizeof(s->modelname) - 1);
+				s->modelname[sizeof(s->modelname) - 1] = '\0';
+			}
+			qunlock(&s->lk);
+			r->ofcall.count = r->ifcall.count;
+			respond(r, nil);
+			return;
+		}
 		if (strncmp(buf, "temp ", 5) == 0) {
 			qlock(&s->lk);
 			s->temp = atof(buf + 5);
@@ -1095,41 +1049,6 @@ fswrite(Req *r)
 		respond(r, nil);
 		return;
 
-	case Qsessmodel:
-		s = session_get(sessid);
-		if (s == nil) {
-			respond(r, "session not found");
-			return;
-		}
-		qlock(&s->lk);
-		if (s->state == SESS_GENERATING) {
-			qunlock(&s->lk);
-			respond(r, "cannot change model while generating");
-			return;
-		}
-		/* Release previous model if bound */
-		if (s->model != nil) {
-			pool_release(&server.pool, s->model);
-			s->model = nil;
-			s->modelname[0] = '\0';
-		}
-		/* Bind to new model (if not empty/default) */
-		if (buf[0] != '\0' && strcmp(buf, "(default)") != 0) {
-			PoolEntry *e = pool_get(&server.pool, buf);
-			if (e == nil) {
-				qunlock(&s->lk);
-				respond(r, "model not found in pool");
-				return;
-			}
-			s->model = e;
-			strncpy(s->modelname, buf, sizeof(s->modelname) - 1);
-			s->modelname[sizeof(s->modelname) - 1] = '\0';
-		}
-		qunlock(&s->lk);
-		r->ofcall.count = r->ifcall.count;
-		respond(r, nil);
-		return;
-
 	default:
 		respond(r, "cannot write to this file");
 		return;
@@ -1152,11 +1071,8 @@ fsopen(Req *r)
 		break;
 	case Qoutput:
 	case Qstream:
-	case Qmodel:
-	case Qstatus:
-	case Qpoolcount:
-	case Qpoolmemory:
-	case Qpoollist:
+	case Qinfo:
+	case Qsessinfo:
 		if (omode != OREAD) {
 			respond(r, "file is read-only");
 			return;
@@ -1182,8 +1098,8 @@ fsstat(Req *r)
 	case Qctl:
 		mkdir(&d, Qctl, 0, "ctl");
 		break;
-	case Qmodel:
-		mkdir(&d, Qmodel, 0, "model");
+	case Qinfo:
+		mkdir(&d, Qinfo, 0, "info");
 		break;
 	case Qclone:
 		mkdir(&d, Qclone, 0, "clone");
@@ -1195,6 +1111,9 @@ fsstat(Req *r)
 	case Qsessctl:
 		mkdir(&d, Qsessctl, sessid, "ctl");
 		break;
+	case Qsessinfo:
+		mkdir(&d, Qsessinfo, sessid, "info");
+		break;
 	case Qprompt:
 		mkdir(&d, Qprompt, sessid, "prompt");
 		break;
@@ -1203,24 +1122,6 @@ fsstat(Req *r)
 		break;
 	case Qstream:
 		mkdir(&d, Qstream, sessid, "stream");
-		break;
-	case Qstatus:
-		mkdir(&d, Qstatus, sessid, "status");
-		break;
-	case Qpool:
-		mkdir(&d, Qpool, 0, "pool");
-		break;
-	case Qpoolcount:
-		mkdir(&d, Qpoolcount, 0, "count");
-		break;
-	case Qpoolmemory:
-		mkdir(&d, Qpoolmemory, 0, "memory");
-		break;
-	case Qpoollist:
-		mkdir(&d, Qpoollist, 0, "list");
-		break;
-	case Qsessmodel:
-		mkdir(&d, Qsessmodel, sessid, "model");
 		break;
 	default:
 		respond(r, "unknown file");
