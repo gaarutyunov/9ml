@@ -840,16 +840,25 @@ deinterleave_qk_weights(float *weights, int n_heads, int head_dim, int dim)
 /*
  * Helper to load a single tensor by name into a float buffer.
  * Returns number of floats loaded, or -1 on error.
+ * Set quiet=1 to suppress "tensor not found" message (for fallback lookups).
  */
 static vlong
-load_tensor_by_name(GGUFFile *gf, char *name, float *out, vlong max_floats)
+load_tensor_by_name_q(GGUFFile *gf, char *name, float *out, vlong max_floats, int quiet)
 {
     GGUFTensorInfo *t = gguf_find_tensor(gf, name);
     if (t == nil) {
-        fprint(2, "gguf: tensor not found: %s\n", name);
+        if (!quiet)
+            fprint(2, "gguf: tensor not found: %s\n", name);
         return -1;
     }
     return gguf_dequant_tensor(gf, t, out, max_floats);
+}
+
+/* Convenience wrapper - always prints error on failure */
+static vlong
+load_tensor_by_name(GGUFFile *gf, char *name, float *out, vlong max_floats)
+{
+    return load_tensor_by_name_q(gf, name, out, max_floats, 0);
 }
 
 /*
@@ -961,11 +970,12 @@ gguf_load_transformer(char *path, void *transformer)
     /* token_embedding_table
      * Try token_embd.weight first, fall back to output.weight for tied embeddings */
     t->weights.token_embedding_table = ptr;
-    if (load_tensor_by_name(&gf, "token_embd.weight", ptr,
-                            (vlong)cfg.vocab_size * cfg.dim) < 0) {
+    if (load_tensor_by_name_q(&gf, "token_embd.weight", ptr,
+                              (vlong)cfg.vocab_size * cfg.dim, 1) < 0) {
         /* Try output.weight as fallback (tied embeddings case) */
         if (load_tensor_by_name(&gf, "output.weight", ptr,
                                 (vlong)cfg.vocab_size * cfg.dim) < 0) {
+            fprint(2, "gguf: neither token_embd.weight nor output.weight found\n");
             free(weights_data);
             gguf_close(&gf);
             return -1;

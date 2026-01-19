@@ -437,78 +437,28 @@ void free_run_state(RunState* s) {
     free(s->value_cache);
 }
 
-void memory_map_weights(TransformerWeights *w, Config* p, float* ptr, int shared_weights) {
-    int head_size = p->dim / p->n_heads;
-    // make sure the multiplications below are done in 64bit to fit the parameter counts of 13B+ models
-    uvlong n_layers = p->n_layers;
-    w->token_embedding_table = ptr;
-    ptr += p->vocab_size * p->dim;
-    w->rms_att_weight = ptr;
-    ptr += n_layers * p->dim;
-    w->wq = ptr;
-    ptr += n_layers * p->dim * (p->n_heads * head_size);
-    w->wk = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
-    w->wv = ptr;
-    ptr += n_layers * p->dim * (p->n_kv_heads * head_size);
-    w->wo = ptr;
-    ptr += n_layers * (p->n_heads * head_size) * p->dim;
-    w->rms_ffn_weight = ptr;
-    ptr += n_layers * p->dim;
-    w->w1 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    w->w2 = ptr;
-    ptr += n_layers * p->hidden_dim * p->dim;
-    w->w3 = ptr;
-    ptr += n_layers * p->dim * p->hidden_dim;
-    w->rms_final_weight = ptr;
-    ptr += p->dim;
-    ptr += p->seq_len * head_size / 2; // skip what used to be freq_cis_real (for RoPE)
-    ptr += p->seq_len * head_size / 2; // skip what used to be freq_cis_imag (for RoPE)
-    w->wcls = shared_weights ? w->token_embedding_table : ptr;
-}
-
 // ----------------------------------------------------------------------------
 // Model Format Detection and Loading
 //
 // Supported formats:
 //   - GGUF: llama.cpp format with GGUF magic (0x46554747)
 //   - Safetensors: HuggingFace format (8-byte header size + JSON)
-//   - Legacy/9ml: Custom binary format (llama2.c compatible)
-//
-// Legacy format (llama2.c compatible): 7 ints (28 bytes)
-//   dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len
-//
-// Extended format (9ml v1): magic + explicit architecture info
-//   magic (4 bytes): 0x394D4C01 ("9ML\x01")
-//   header_size (4 bytes): total header size (60 for v1)
-//   arch_id (4 bytes): 1=llama2, 2=llama3, 3=mistral
-//   rope_theta (4 bytes): float, e.g., 10000.0 or 500000.0
-//   ffn_type (4 bytes): 0=SwiGLU, 1=GeGLU, 2=GELU
-//   flags (4 bytes): bit0=attn_bias, bit1=mlp_bias
-//   sliding_window (4 bytes): 0=full attention, >0=window size
-//   reserved (4 bytes): for future use
-//   dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len (28 bytes)
 
 /* Format type enumeration */
 enum {
     FORMAT_UNKNOWN = 0,
-    FORMAT_LEGACY = 1,      /* llama2.c / 9ml custom binary */
-    FORMAT_GGUF = 2,        /* GGUF (llama.cpp) */
-    FORMAT_SAFETENSORS = 3, /* Safetensors (HuggingFace) */
+    FORMAT_GGUF = 1,        /* GGUF (llama.cpp) */
+    FORMAT_SAFETENSORS = 2, /* Safetensors (HuggingFace) */
 };
 
 /* Magic numbers */
-#define FORMAT_MAGIC_9ML_V1   0x394D4C01  /* "9ML\x01" */
 #define FORMAT_MAGIC_GGUF     0x46554747  /* "GGUF" */
-#define LEGACY_CONFIG_SIZE    (7 * sizeof(int))   /* 28 bytes */
-#define EXTENDED_HEADER_SIZE  (15 * sizeof(int))  /* 60 bytes */
 
 /* Architecture IDs are defined in arch/arch.h */
 
 /*
  * detect_format - Detect model file format from magic bytes
- * Returns FORMAT_GGUF, FORMAT_SAFETENSORS, or FORMAT_LEGACY
+ * Returns FORMAT_GGUF, FORMAT_SAFETENSORS, or FORMAT_UNKNOWN
  */
 static int
 detect_format(char *path)
@@ -554,145 +504,8 @@ detect_format(char *path)
         }
     }
 
-    /* Check 9ml extended format magic */
-    if (magic == FORMAT_MAGIC_9ML_V1) {
-        return FORMAT_LEGACY;
-    }
-
-    /* Default to legacy format (llama2.c) */
-    return FORMAT_LEGACY;
-}
-
-void read_checkpoint(char* checkpoint, Config* config, TransformerWeights* weights,
-                     float** data, vlong* file_size) {
-    int fd;
-    Dir *d;
-    vlong n;
-    uint magic;
-    int header_size;
-    int shared_weights;
-
-    // open file and get size
-    fd = open(checkpoint, OREAD);
-    if (fd < 0) {
-        fprint(2, "Couldn't open file %s\n", checkpoint);
-        exits("open");
-    }
-    d = dirfstat(fd);
-    if (d == nil) {
-        fprint(2, "dirfstat failed\n");
-        close(fd);
-        exits("dirfstat");
-    }
-    *file_size = d->length;
-    free(d);
-
-    // Read first 4 bytes to detect format
-    n = read(fd, &magic, sizeof(uint));
-    if (n != sizeof(uint)) {
-        fprint(2, "failed to read header\n");
-        close(fd);
-        exits("read");
-    }
-
-    if (magic == FORMAT_MAGIC_9ML_V1) {
-        // Extended 9ml format - read full extended header
-        int ext_buf[14];  /* header_size + 13 more fields */
-        n = read(fd, ext_buf, 14 * sizeof(int));
-        if (n != 14 * sizeof(int)) {
-            fprint(2, "failed to read extended header\n");
-            close(fd);
-            exits("read");
-        }
-
-        header_size = ext_buf[0];
-        config->arch_id = ext_buf[1];
-
-        // rope_theta is stored as float bits in an int slot
-        union { int i; float f; } theta_conv;
-        theta_conv.i = ext_buf[2];
-        config->rope_theta = theta_conv.f;
-
-        // Skip ffn_type (ext_buf[3]), flags (ext_buf[4]),
-        // sliding_window (ext_buf[5]), reserved (ext_buf[6])
-
-        config->dim = ext_buf[7];
-        config->hidden_dim = ext_buf[8];
-        config->n_layers = ext_buf[9];
-        config->n_heads = ext_buf[10];
-        config->n_kv_heads = ext_buf[11];
-        config->vocab_size = ext_buf[12];
-        config->seq_len = ext_buf[13];
-
-        // Handle shared weights flag
-        shared_weights = config->vocab_size > 0 ? 1 : 0;
-        if (config->vocab_size < 0) config->vocab_size = -config->vocab_size;
-
-        // Skip any extra header bytes if header_size > EXTENDED_HEADER_SIZE
-        if (header_size > EXTENDED_HEADER_SIZE) {
-            seek(fd, header_size - EXTENDED_HEADER_SIZE, 1);
-        }
-
-    } else {
-        // Legacy llama2.c format - magic was actually dim
-        int config_buf[6];  /* remaining 6 fields */
-        n = read(fd, config_buf, 6 * sizeof(int));
-        if (n != 6 * sizeof(int)) {
-            fprint(2, "failed to read legacy config\n");
-            close(fd);
-            exits("read");
-        }
-
-        config->dim = (int)magic;  /* first int was dim */
-        config->hidden_dim = config_buf[0];
-        config->n_layers = config_buf[1];
-        config->n_heads = config_buf[2];
-        config->n_kv_heads = config_buf[3];
-        config->vocab_size = config_buf[4];
-        config->seq_len = config_buf[5];
-
-        // negative vocab size signals unshared weights
-        shared_weights = config->vocab_size > 0 ? 1 : 0;
-        if (config->vocab_size < 0) config->vocab_size = -config->vocab_size;
-
-        // Auto-detect architecture from vocab size (heuristic for legacy files)
-        if (config->vocab_size >= 100000) {
-            config->rope_theta = 500000.0f;
-            config->arch_id = ARCH_LLAMA3;
-        } else {
-            config->rope_theta = 10000.0f;
-            config->arch_id = ARCH_LLAMA2;
-        }
-
-        header_size = LEGACY_CONFIG_SIZE;
-    }
-
-    // Allocate memory for weights
-    vlong weights_size = *file_size - header_size;
-    *data = malloc(weights_size);
-    if (*data == nil) {
-        fprint(2, "malloc failed for weights\n");
-        close(fd);
-        exits("malloc");
-    }
-
-    // Read weights in chunks (Plan 9 read may have size limits)
-    char *buf = (char*)*data;
-    vlong remaining = weights_size;
-    while (remaining > 0) {
-        long chunk = remaining > 8192 ? 8192 : remaining;
-        n = read(fd, buf, chunk);
-        if (n <= 0) {
-            fprint(2, "failed to read weights\n");
-            close(fd);
-            exits("read");
-        }
-        buf += n;
-        remaining -= n;
-    }
-    close(fd);
-
-    memory_map_weights(weights, config, *data, shared_weights);
+    /* Unknown format */
+    return FORMAT_UNKNOWN;
 }
 
 void build_transformer(Transformer *t, char* checkpoint_path) {
@@ -724,11 +537,10 @@ void build_transformer(Transformer *t, char* checkpoint_path) {
         }
         break;
 
-    case FORMAT_LEGACY:
     default:
-        // Load from legacy/9ml format
-        read_checkpoint(checkpoint_path, &t->config, &t->weights, &t->data, &t->file_size);
-        break;
+        fprint(2, "Unknown model format: %s\n", checkpoint_path);
+        fprint(2, "Supported formats: .safetensors, .gguf\n");
+        exits("format");
     }
 
     // allocate the RunState buffers

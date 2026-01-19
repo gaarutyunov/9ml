@@ -21,8 +21,6 @@
 #define SHARED_IMAGE QEMU_DIR "/shared.img"
 #define CPU_DISK     QEMU_DIR "/cpu.qcow2"
 #define TERM_DISK    QEMU_DIR "/terminal.qcow2"
-#define MODEL_FILE   "../stories15M.bin"
-#define MODEL_Q_FILE "../stories15M_q80.bin"
 #define TOKENIZER_FILE "../tokenizer.bin"
 #define GGUF_Q4_FILE "../models/stories15M-Q4_0.gguf"
 #define GGUF_Q8_FILE "../models/stories15M-Q8_0.gguf"
@@ -199,24 +197,14 @@ static int prepare_shared_disk(void) {
         }
     }
 
-    /* Copy model files if present */
-    if (file_exists(MODEL_FILE)) {
-        if (fat_copy_to(SHARED_IMAGE, MODEL_FILE, "stories15M.bin") != 0) {
-            fprintf(stderr, "Warning: failed to copy model file\n");
-        }
-    }
-    if (file_exists(MODEL_Q_FILE)) {
-        if (fat_copy_to(SHARED_IMAGE, MODEL_Q_FILE, "stories15M_q80.bin") != 0) {
-            fprintf(stderr, "Warning: failed to copy quantized model file\n");
-        }
-    }
+    /* Copy tokenizer */
     if (file_exists(TOKENIZER_FILE)) {
         if (fat_copy_to(SHARED_IMAGE, TOKENIZER_FILE, "tokenizer.bin") != 0) {
             fprintf(stderr, "Warning: failed to copy tokenizer file\n");
         }
     }
 
-    /* Copy GGUF test models if present */
+    /* Copy GGUF models if present */
     if (file_exists(GGUF_Q4_FILE)) {
         if (fat_copy_to(SHARED_IMAGE, GGUF_Q4_FILE, "stories15M-Q4_0.gguf") != 0) {
             fprintf(stderr, "Warning: failed to copy Q4_0 GGUF file\n");
@@ -321,15 +309,13 @@ static int run_vm_tests(void) {
     /* Link with simd_amd64.6 for SSE, arch.a6 for arch plugins, format.a6 for GGUF/safetensors */
     run_vm_cmd("6c -w -Iformat run.c >[2=1] > runcmp.log; echo run_compile_done", 60);
     run_vm_cmd("6l -o run run.6 simd_amd64.6 arch/arch.a6 format/format.a6 >[2=1] >> runcmp.log; echo run_link_done", 30);
-    run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation.out >[2=1]", 120);
+    run_vm_cmd("./run stories15M.safetensors -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation.out >[2=1]", 120);
 
     /* Generation test WITH SIMD - must produce same output as scalar */
-    run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 -j 1 > generation_simd.out >[2=1]", 120);
+    run_vm_cmd("./run stories15M.safetensors -z tokenizer.bin -n 20 -s 42 -t 0.0 -j 1 > generation_simd.out >[2=1]", 120);
 
-    /* Quantized generation test (runq.c with Q8_0 model) */
-    run_vm_cmd("6c -w runq.c", 60);
-    run_vm_cmd("6l -o runq runq.6 simd_amd64.6 simdq_amd64.6", 30);
-    run_vm_cmd("./runq stories15M_q80.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation_q.out >[2=1]", 120);
+    /* Quantized generation test (GGUF Q8_0 model via run.c) */
+    run_vm_cmd("./run stories15M-Q8_0.gguf -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation_q.out >[2=1]", 120);
 
     /* Simple threading test first (no SIMD linked) - includes model.c, needs arch */
     run_vm_cmd("6c -w test_thread_simple.c", 30);
@@ -713,34 +699,16 @@ static void test_quantized_matmul(void) {
     }
 }
 
-/* Test: model_loading */
+/* Test: model_loading - DEPRECATED (was for legacy format, now use format_generation test) */
 static void test_model_loading(void) {
     printf("Testing model_loading... ");
+    add_result("model_loading", 0, 1, "deprecated - use format_generation test");
+    printf("SKIP (legacy format test - use format_generation)\n");
+    return;
 
-    if (!file_exists(MODEL_FILE)) {
-        add_result("model_loading", 0, 1, "model not found");
-        printf("SKIP (model not found)\n");
-        return;
-    }
-
-    /* Read expected config from model file */
-    FILE *f = fopen(MODEL_FILE, "rb");
-    if (!f) {
-        add_result("model_loading", 0, 1, "cannot open model");
-        printf("SKIP (cannot open model)\n");
-        return;
-    }
-
+    /* Legacy test code removed - was for .bin format parsing verification */
     int config[7];
     float weights[10];
-    if (fread(config, sizeof(int), 7, f) != 7 ||
-        fread(weights, sizeof(float), 10, f) != 10) {
-        fclose(f);
-        add_result("model_loading", 0, 0, "failed to read model");
-        printf("FAIL (read error)\n");
-        return;
-    }
-    fclose(f);
 
     /* vocab_size may be negative (signals shared weights) */
     int vocab_size = config[5];
@@ -805,7 +773,7 @@ static void test_model_loading(void) {
 static void test_generation(void) {
     printf("Testing generation... ");
 
-    if (!file_exists(MODEL_FILE) || !file_exists(TOKENIZER_FILE)) {
+    if (!file_exists(SAFETENSORS_FILE) || !file_exists(TOKENIZER_FILE)) {
         add_result("generation", 0, 1, "model or tokenizer not found");
         printf("SKIP (model or tokenizer not found)\n");
         return;
@@ -837,9 +805,9 @@ static void test_generation(void) {
 static void test_generation_simd(void) {
     printf("Testing generation_simd... ");
 
-    if (!file_exists(MODEL_FILE) || !file_exists(TOKENIZER_FILE)) {
-        add_result("generation_simd", 0, 0, "model or tokenizer not found");
-        printf("FAIL (model or tokenizer not found)\n");
+    if (!file_exists(SAFETENSORS_FILE) || !file_exists(TOKENIZER_FILE)) {
+        add_result("generation_simd", 0, 1, "safetensors model or tokenizer not found");
+        printf("SKIP (safetensors model or tokenizer not found)\n");
         return;
     }
 
@@ -906,13 +874,13 @@ static void test_generation_simd(void) {
     free(simd_data);
 }
 
-/* Test: generation_quantized (runq with Q8_0 model) */
+/* Test: generation_quantized (run.c with GGUF Q8_0 model) */
 static void test_generation_quantized(void) {
     printf("Testing generation_quantized... ");
 
-    if (!file_exists(MODEL_Q_FILE) || !file_exists(TOKENIZER_FILE)) {
-        add_result("generation_quantized", 0, 1, "quantized model or tokenizer not found");
-        printf("SKIP (quantized model or tokenizer not found)\n");
+    if (!file_exists(GGUF_Q8_FILE) || !file_exists(TOKENIZER_FILE)) {
+        add_result("generation_quantized", 0, 1, "GGUF Q8_0 model or tokenizer not found");
+        printf("SKIP (GGUF Q8_0 model or tokenizer not found)\n");
         return;
     }
 
@@ -1645,7 +1613,7 @@ static void run_vm_llmfs_local(void) {
     run_vm_cmd("mount -c /srv/llm /mnt/llm", 3);
 
     /* Load model */
-    run_vm_cmd("echo 'load stories15M.bin tokenizer.bin' > /mnt/llm/ctl", 5);
+    run_vm_cmd("echo 'load stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl", 5);
 
     /* Check model info */
     run_vm_cmd("cat /mnt/llm/model > llmfs_model.out", 3);
@@ -1674,9 +1642,9 @@ static void run_vm_llmfs_local(void) {
 static void test_llmfs_local(void) {
     printf("Testing llmfs_local... ");
 
-    if (!file_exists(MODEL_FILE) || !file_exists(TOKENIZER_FILE)) {
-        add_result("llmfs_local", 0, 1, "model or tokenizer not found");
-        printf("SKIP (model or tokenizer not found)\n");
+    if (!file_exists(SAFETENSORS_FILE) || !file_exists(TOKENIZER_FILE)) {
+        add_result("llmfs_local", 0, 1, "safetensors model or tokenizer not found");
+        printf("SKIP (safetensors model or tokenizer not found)\n");
         return;
     }
 
@@ -1792,7 +1760,7 @@ static int run_dualvm_llmfs_remote(void) {
 
     /* CPU VM: Load model (via local mount) */
     printf("CPU: Loading model...\n");
-    qemu_sendln_wait(&dualvm.cpu, "echo 'load stories15M.bin tokenizer.bin' > /mnt/llm/ctl", 10);
+    qemu_sendln_wait(&dualvm.cpu, "echo 'load stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl", 10);
 
     /* CPU VM: Export mounted llmfs tree via 9P over TCP */
     printf("CPU: Starting 9P export on tcp!*!564...\n");
@@ -1845,7 +1813,7 @@ static int run_dualvm_llmfs_remote(void) {
 static void test_llmfs_remote(void) {
     printf("Testing llmfs_remote... ");
 
-    if (!file_exists(MODEL_FILE) || !file_exists(TOKENIZER_FILE)) {
+    if (!file_exists(SAFETENSORS_FILE) || !file_exists(TOKENIZER_FILE)) {
         add_result("llmfs_remote", 0, 1, "model or tokenizer not found");
         printf("SKIP (model or tokenizer not found)\n");
         return;
@@ -1995,7 +1963,7 @@ int main(int argc, char *argv[]) {
 
     /* Run dual-VM tests for remote 9P (skip if filtering for non-llmfs tests) */
     int run_remote_tests = 1;  /* Set to 1 to enable remote tests */
-    if (run_remote_tests && file_exists(MODEL_FILE) && should_run_test("llmfs_remote")) {
+    if (run_remote_tests && file_exists(SAFETENSORS_FILE) && should_run_test("llmfs_remote")) {
         run_dualvm_llmfs_remote();
     }
 

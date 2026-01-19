@@ -1,13 +1,12 @@
 /*
  * test_format_generation.c - Compare text generation across model formats
  *
- * Tests that legacy (.bin), safetensors (.safetensors), and GGUF (.gguf)
- * model formats produce identical generation output with deterministic settings.
+ * Tests that safetensors (.safetensors) and GGUF (.gguf) model formats
+ * produce identical generation output with deterministic settings.
  *
  * This test requires:
- *   - stories15M.bin (legacy format)
- *   - stories15M.safetensors (safetensors format, converted from legacy)
- *   - stories15M-Q8_0.gguf (GGUF Q8_0 format, converted from legacy)
+ *   - stories15M.safetensors (safetensors format)
+ *   - stories15M-Q8_0.gguf (GGUF Q8_0 format)
  *   - tokenizer.bin
  */
 
@@ -16,7 +15,6 @@
 #include "model.c"
 
 /* Model file paths - these will be on the shared disk */
-#define LEGACY_MODEL      "/mnt/host/stories15M.bin"
 #define SAFETENSORS_MODEL "/mnt/host/stories15M.safetensors"
 #define GGUF_MODEL        "/mnt/host/stories15M-Q8_0.gguf"
 #define TOKENIZER_PATH    "/mnt/host/tokenizer.bin"
@@ -125,32 +123,27 @@ main(int argc, char *argv[])
     USED(argc);
     USED(argv);
 
-    Transformer t_legacy, t_safetensors, t_gguf;
+    Transformer t_safetensors, t_gguf;
     Tokenizer tokenizer;
-    char *out_legacy = nil;
     char *out_safetensors = nil;
     char *out_gguf = nil;
     char *prompt = "Once upon a time";
-    int tests_passed = 0;
-    int tests_run = 0;
-    int have_legacy = 0, have_safetensors = 0, have_gguf = 0;
+    int have_safetensors = 0, have_gguf = 0;
 
     print("=== Format Generation Comparison Test ===\n");
     print("Prompt: \"%s\"\n", prompt);
     print("Steps: %d, Temp: %.1f, Seed: %d\n\n", TEST_STEPS, TEST_TEMP, TEST_SEED);
 
     /* Check which model files are available */
-    have_legacy = file_exists(LEGACY_MODEL);
     have_safetensors = file_exists(SAFETENSORS_MODEL);
     have_gguf = file_exists(GGUF_MODEL);
 
     print("Model files found:\n");
-    print("  Legacy (.bin):     %s\n", have_legacy ? "YES" : "NO");
     print("  Safetensors:       %s\n", have_safetensors ? "YES" : "NO");
     print("  GGUF (Q8_0):       %s\n", have_gguf ? "YES" : "NO");
     print("\n");
 
-    if (!have_legacy && !have_safetensors && !have_gguf) {
+    if (!have_safetensors && !have_gguf) {
         print("FAIL: No model files found\n");
         exits("nomodels");
     }
@@ -164,30 +157,7 @@ main(int argc, char *argv[])
     /* We need at least one model to get vocab_size for tokenizer */
     int vocab_size = 32000;  /* Default for stories15M */
 
-    /* Test 1: Legacy format */
-    if (have_legacy) {
-        print("Loading legacy model...\n");
-        build_transformer(&t_legacy, LEGACY_MODEL);
-        vocab_size = t_legacy.config.vocab_size;
-        print("  Config: dim=%d, layers=%d, heads=%d, vocab=%d\n",
-              t_legacy.config.dim, t_legacy.config.n_layers,
-              t_legacy.config.n_heads, t_legacy.config.vocab_size);
-
-        build_tokenizer(&tokenizer, TOKENIZER_PATH, vocab_size);
-
-        print("Generating with legacy model...\n");
-        out_legacy = generate_text(&t_legacy, &tokenizer, prompt, TEST_STEPS, TEST_TEMP, TEST_SEED);
-        if (out_legacy) {
-            print("  Output: %s\n", out_legacy);
-        } else {
-            print("  ERROR: Generation failed\n");
-        }
-        free_transformer(&t_legacy);
-        free_tokenizer(&tokenizer);
-        print("\n");
-    }
-
-    /* Test 2: Safetensors format */
+    /* Test 1: Safetensors format */
     if (have_safetensors) {
         print("Loading safetensors model...\n");
         build_transformer(&t_safetensors, SAFETENSORS_MODEL);
@@ -210,7 +180,7 @@ main(int argc, char *argv[])
         print("\n");
     }
 
-    /* Test 3: GGUF format */
+    /* Test 2: GGUF format */
     if (have_gguf) {
         print("Loading GGUF model...\n");
         build_transformer(&t_gguf, GGUF_MODEL);
@@ -236,59 +206,29 @@ main(int argc, char *argv[])
     /* Compare outputs */
     print("=== Comparison Results ===\n");
 
-    if (have_legacy && have_safetensors) {
-        tests_run++;
-        if (strings_match(out_legacy, out_safetensors)) {
-            print("Legacy vs Safetensors: MATCH\n");
-            tests_passed++;
-        } else {
-            print("Legacy vs Safetensors: MISMATCH\n");
-            print("  Legacy:      %s\n", out_legacy ? out_legacy : "(null)");
-            print("  Safetensors: %s\n", out_safetensors ? out_safetensors : "(null)");
-        }
-    }
-
-    if (have_legacy && have_gguf) {
-        tests_run++;
-        if (strings_match(out_legacy, out_gguf)) {
-            print("Legacy vs GGUF: MATCH\n");
-            tests_passed++;
-        } else {
-            print("Legacy vs GGUF: MISMATCH\n");
-            print("  Legacy: %s\n", out_legacy ? out_legacy : "(null)");
-            print("  GGUF:   %s\n", out_gguf ? out_gguf : "(null)");
-        }
-    }
-
     if (have_safetensors && have_gguf) {
-        tests_run++;
         if (strings_match(out_safetensors, out_gguf)) {
             print("Safetensors vs GGUF: MATCH\n");
-            tests_passed++;
+            print("\n=== Summary ===\n");
+            print("PASS: All format generation tests passed\n");
+            if (out_safetensors) free(out_safetensors);
+            if (out_gguf) free(out_gguf);
+            exits(0);
         } else {
             print("Safetensors vs GGUF: MISMATCH\n");
             print("  Safetensors: %s\n", out_safetensors ? out_safetensors : "(null)");
             print("  GGUF:        %s\n", out_gguf ? out_gguf : "(null)");
+            print("\n=== Summary ===\n");
+            print("FAIL: Format generation tests failed\n");
+            if (out_safetensors) free(out_safetensors);
+            if (out_gguf) free(out_gguf);
+            exits("fail");
         }
-    }
-
-    /* Clean up */
-    if (out_legacy) free(out_legacy);
-    if (out_safetensors) free(out_safetensors);
-    if (out_gguf) free(out_gguf);
-
-    /* Final verdict */
-    print("\n=== Summary ===\n");
-    print("Tests run: %d, Passed: %d\n", tests_run, tests_passed);
-
-    if (tests_run == 0) {
-        print("SKIP: Not enough model files for comparison\n");
-        exits(0);
-    } else if (tests_passed == tests_run) {
-        print("PASS: All format generation tests passed\n");
-        exits(0);
     } else {
-        print("FAIL: Some format generation tests failed\n");
-        exits("fail");
+        /* Only one format available - can't compare, but we can verify it works */
+        print("SKIP: Need both safetensors and GGUF for comparison\n");
+        if (out_safetensors) free(out_safetensors);
+        if (out_gguf) free(out_gguf);
+        exits(0);
     }
 }

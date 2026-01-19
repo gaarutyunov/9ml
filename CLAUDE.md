@@ -40,14 +40,16 @@ mk            # Build all: run, runq, export, tests
 mk clean      # Clean all build artifacts
 ```
 
-### Model Tools
+### Supported Model Formats
+
+9ml supports **safetensors** and **GGUF** model formats:
 
 ```bash
-# Show model info
-./export info stories15M.bin
+# Run with safetensors model
+./run model.safetensors -z tokenizer.bin -n 50
 
-# Quantize a model (FP32 -> Q8_0)
-./export quantize stories15M.bin stories15M_q80.bin
+# Run with GGUF model (supports quantized models)
+./run model-Q8_0.gguf -z tokenizer.bin -n 50
 ```
 
 ---
@@ -93,8 +95,10 @@ mk clean      # Clean all build artifacts
 ├── qemu/
 │   ├── 9front.qcow2       # VM disk image
 │   └── shared.img         # FAT disk for file sharing
+├── models/                # Model files (download separately)
+│   ├── *.safetensors      # Safetensors format (HuggingFace)
+│   └── *.gguf             # GGUF format (llama.cpp)
 ├── mkfile                 # Root Plan 9 build file
-├── stories15M.bin         # Model weights (FP32)
 └── tokenizer.bin          # Tokenizer data
 ```
 
@@ -138,7 +142,7 @@ make test
 | rmsnorm_simd | RMSNorm SIMD optimization tests |
 | arch_detect | Architecture auto-detection from model file |
 | arch_llama3 | LLaMA 3 architecture (rope_theta=500000) |
-| format_detect | File format detection (native, GGUF, safetensors) |
+| format_detect | File format detection (GGUF, safetensors) |
 | softmax_benchmark | Softmax performance benchmark |
 | softmax_accuracy | Softmax numerical accuracy tests |
 | gguf_dequant | GGUF Q4_0/Q8_0 dequantization |
@@ -239,34 +243,30 @@ opt_config.nthreads = 4;    /* Set thread count (0 = auto) */
 
 Command-line flags:
 ```rc
-./run model.bin -z tok.bin --no-simd    # Disable SIMD
-./run model.bin -z tok.bin --threads 2  # Set thread count
+./run model.safetensors -z tok.bin --no-simd    # Disable SIMD
+./run model.safetensors -z tok.bin --threads 2  # Set thread count
 ```
 
 ---
 
 ## Running Inference
 
-### FP32 Inference (run.c)
+### FP32 Inference (safetensors)
 
 In Plan 9:
 ```rc
 6c -w run.c && 6l -o run run.6
-./run stories15M.bin -z tokenizer.bin -n 50 -i 'Once upon a time'
+./run model.safetensors -z tokenizer.bin -n 50 -i 'Once upon a time'
 ```
 
-### INT8 Quantized Inference (runq.c)
+### Quantized Inference (GGUF)
 
-First, quantize the model:
-```bash
-./export quantize stories15M.bin stories15M_q80.bin
-```
-
-Then run in Plan 9:
+Run with a GGUF Q8_0 model (8-bit quantization):
 ```rc
-6c -w runq.c && 6l -o runq runq.6
-./runq stories15M_q80.bin -z tokenizer.bin -n 50
+./run model-Q8_0.gguf -z tokenizer.bin -n 50 -i 'Once upon a time'
 ```
+
+GGUF supports various quantization levels (Q4_0, Q8_0, etc.) for reduced memory and faster inference.
 
 ### Command Line Options
 
@@ -284,15 +284,15 @@ Then run in Plan 9:
 
 ## Model Export Tool
 
-The `export` tool handles model inspection and conversion:
+The `export` tool can inspect model files:
 
 ```bash
 # Show model info (works on Linux or Plan 9)
-./export info model.bin
-
-# Quantize FP32 model to Q8_0 (32-element groups)
-./export quantize model.bin model_q80.bin
+./export info model.safetensors
+./export info model-Q8_0.gguf
 ```
+
+**Note:** For quantized models, download pre-quantized GGUF files directly from HuggingFace rather than converting. The llama.cpp project provides tools for creating GGUF files with various quantization levels (Q4_0, Q8_0, etc.).
 
 Build on Linux:
 ```bash
@@ -308,44 +308,43 @@ Build on Plan 9:
 
 ## Supported Model Formats
 
-9ml supports three model formats with automatic detection:
+9ml supports two model formats with automatic detection:
 
 ### Format Detection
 
 The model loader automatically detects format based on file magic:
 1. **GGUF**: Magic `0x46554747` ("GGUF" in little-endian)
 2. **Safetensors**: 8-byte header size followed by JSON metadata
-3. **Legacy (.bin)**: Native llama2.c format with 7-int or 10-int header
 
 ### Format Comparison
 
-| Feature | Legacy (.bin) | Safetensors | GGUF |
-|---------|---------------|-------------|------|
-| Source | llama2.c native | HuggingFace | llama.cpp |
-| Precision | FP32 | FP32/FP16 | FP32/FP16/Quantized |
-| Quantization | Q8_0 via export | No | Q4_0, Q8_0, etc. |
-| Metadata | Minimal (7-10 ints) | JSON header | Key-value pairs |
-| Tensor names | Positional | HuggingFace names | GGML names |
-| File size (15M) | ~60 MB | ~60 MB | ~15-17 MB (Q8_0) |
+| Feature | Safetensors | GGUF |
+|---------|-------------|------|
+| Source | HuggingFace | llama.cpp |
+| Precision | FP32/FP16 | FP32/FP16/Quantized |
+| Quantization | No | Q4_0, Q8_0, etc. |
+| Metadata | JSON header | Key-value pairs |
+| Tensor names | HuggingFace names | GGML names |
+| File size (15M) | ~60 MB | ~15-17 MB (Q8_0) |
 
 ### Tensor Name Mapping
 
 Different formats use different tensor names:
 
-| Weight | Legacy (position) | HuggingFace/Safetensors | GGUF |
-|--------|-------------------|-------------------------|------|
-| Token embeddings | 0 | `model.embed_tokens.weight` | `token_embd.weight` |
-| Q projection | per-layer | `model.layers.N.self_attn.q_proj.weight` | `blk.N.attn_q.weight` |
-| K projection | per-layer | `model.layers.N.self_attn.k_proj.weight` | `blk.N.attn_k.weight` |
-| V projection | per-layer | `model.layers.N.self_attn.v_proj.weight` | `blk.N.attn_v.weight` |
-| O projection | per-layer | `model.layers.N.self_attn.o_proj.weight` | `blk.N.attn_output.weight` |
-| Gate (w1) | per-layer | `model.layers.N.mlp.gate_proj.weight` | `blk.N.ffn_gate.weight` |
-| Up (w3) | per-layer | `model.layers.N.mlp.up_proj.weight` | `blk.N.ffn_up.weight` |
-| Down (w2) | per-layer | `model.layers.N.mlp.down_proj.weight` | `blk.N.ffn_down.weight` |
-| Attn norm | per-layer | `model.layers.N.input_layernorm.weight` | `blk.N.attn_norm.weight` |
-| FFN norm | per-layer | `model.layers.N.post_attention_layernorm.weight` | `blk.N.ffn_norm.weight` |
-| Final norm | last | `model.norm.weight` | `output_norm.weight` |
-| Output | last (or tied) | `lm_head.weight` | `output.weight` |
+| Weight | Safetensors | GGUF |
+|--------|-------------|------|
+| Token embeddings | `model.embed_tokens.weight` | `token_embd.weight` |
+| Q projection | `model.layers.N.self_attn.q_proj.weight` | `blk.N.attn_q.weight` |
+| K projection | `model.layers.N.self_attn.k_proj.weight` | `blk.N.attn_k.weight` |
+| V projection | `model.layers.N.self_attn.v_proj.weight` | `blk.N.attn_v.weight` |
+| O projection | `model.layers.N.self_attn.o_proj.weight` | `blk.N.attn_output.weight` |
+| Gate (w1) | `model.layers.N.mlp.gate_proj.weight` | `blk.N.ffn_gate.weight` |
+| Up (w3) | `model.layers.N.mlp.up_proj.weight` | `blk.N.ffn_up.weight` |
+| Down (w2) | `model.layers.N.mlp.down_proj.weight` | `blk.N.ffn_down.weight` |
+| Attn norm | `model.layers.N.input_layernorm.weight` | `blk.N.attn_norm.weight` |
+| FFN norm | `model.layers.N.post_attention_layernorm.weight` | `blk.N.ffn_norm.weight` |
+| Final norm | `model.norm.weight` | `output_norm.weight` |
+| Output | `lm_head.weight` | `output.weight` |
 
 ### GGUF Attention Weight Interleaving
 
@@ -377,7 +376,6 @@ python convert_hf_to_gguf.py /path/to/hf-model --outtype f32
 Some models share weights between token embeddings and output projection (`tie_word_embeddings: true`). The loaders handle this:
 - **Safetensors**: Only `model.embed_tokens.weight` present, used for both
 - **GGUF**: Only `output.weight` present, used for both (loader falls back)
-- **Legacy**: Indicated by negative `vocab_size` in header
 
 ---
 
@@ -423,7 +421,7 @@ In Plan 9:
 mount /srv/llm /mnt/llm
 
 # Load a model
-echo 'load stories15M.bin tokenizer.bin' > /mnt/llm/ctl
+echo 'load stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
 
 # Check model info
 cat /mnt/llm/model
@@ -452,7 +450,7 @@ On the server machine (cpu):
 ```rc
 # Start llmfs
 ./llmfs -s llm
-echo 'load stories15M.bin tokenizer.bin' > /srv/llm/ctl
+echo 'load stories15M.safetensors tokenizer.bin' > /srv/llm/ctl
 
 # Export over network
 aux/listen1 -tv tcp!*!564 /bin/exportfs -r /srv/llm
@@ -497,8 +495,8 @@ cat /mnt/llm/0/output
 
 ```rc
 # Load multiple models into the pool
-echo 'pool-load small stories15M.bin tokenizer.bin' > /mnt/llm/ctl
-echo 'pool-load large llama2-7b.bin tokenizer.bin' > /mnt/llm/ctl
+echo 'pool-load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
+echo 'pool-load large llama2-7b.gguf tokenizer.bin' > /mnt/llm/ctl
 
 # Check pool status
 cat /mnt/llm/pool/count    # "2"
@@ -531,19 +529,23 @@ To use models with 9ml:
    # Install huggingface-cli
    pip install huggingface-hub
 
-   # Download a model
-   huggingface-cli download karpathy/tinyllamas --include "*.bin"
+   # Download safetensors model
+   huggingface-cli download Xenova/llama2.c-stories15M model.safetensors --local-dir models/
+
+   # Download GGUF model (pre-quantized)
+   huggingface-cli download tensorblock/Xenova_llama2.c-stories15M-GGUF \
+       llama2.c-stories15M-Q8_0.gguf --local-dir models/
    ```
 
 2. **Copy to shared disk** for use in Plan 9:
    ```bash
    # Copy model files to the FAT shared disk
-   mcopy -i qemu/shared.img model.bin tokenizer.bin ::
+   mcopy -i qemu/shared.img models/model.safetensors models/tokenizer.bin ::
    ```
 
 3. **Load in Plan 9** via llmfs:
    ```rc
-   echo 'pool-load mymodel /mnt/host/model.bin /mnt/host/tokenizer.bin' > /mnt/llm/ctl
+   echo 'pool-load mymodel /mnt/host/model.safetensors /mnt/host/tokenizer.bin' > /mnt/llm/ctl
    ```
 
 ---
