@@ -46,19 +46,32 @@ int qemu_sendln_wait(QemuVM *vm, const char *text, int timeout_secs);
 /* Wait for output containing a pattern (with timeout in seconds) */
 int qemu_wait_for(QemuVM *vm, const char *pattern, int timeout_secs);
 
+/* Enable/disable VM output debugging */
+void qemu_set_debug(int enable);
+
 /* Sleep helper */
 void qemu_sleep(int seconds);
 
 /* Shutdown the VM */
 int qemu_shutdown(QemuVM *vm);
 
-/* Kill any lingering QEMU processes */
+/* Kill only QEMU processes started by this harness */
 void qemu_killall(void);
+
+/* Initialize/cleanup VM tracking */
+void qemu_tracker_init(void);
+void qemu_tracker_cleanup(void);
 
 /* Dual-VM management */
 int dualvm_start(DualVM *d, const char *cpu_disk, const char *term_disk, const char *shared_image);
 int dualvm_shutdown(DualVM *d);
 int dualvm_boot_and_mount_shared(DualVM *d);
 int dualvm_configure_network(DualVM *d);
+
+/* Start VM with internet access (user-mode networking with NAT) */
+int qemu_start_with_internet(QemuVM *vm, const char *disk_image, const char *shared_image);
+
+/* Configure Plan 9 networking for internet access (DHCP on user-mode network) */
+int qemu_configure_internet(QemuVM *vm);
 
 #endif /* QEMU_H */

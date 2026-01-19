@@ -24,6 +24,8 @@
 #define MODEL_FILE   "../stories15M.bin"
 #define MODEL_Q_FILE "../stories15M_q80.bin"
 #define TOKENIZER_FILE "../tokenizer.bin"
+#define GGUF_Q4_FILE "../tinyllama-15M-stories-Q4_0.gguf"
+#define GGUF_Q8_FILE "../tinyllama-15M-stories-Q8_0.gguf"
 
 /* Epsilon for float comparisons */
 #define EPSILON      0.0001f
@@ -37,7 +39,7 @@ typedef struct {
     char error[256];
 } TestResult;
 
-static TestResult results[20];
+static TestResult results[30];
 static int num_results = 0;
 static QemuVM vm;
 static DualVM dualvm;
@@ -115,6 +117,12 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_format_detect.c",
         TESTS_DIR "/test_softmax_benchmark.c",
         TESTS_DIR "/test_softmax_accuracy.c",
+        TESTS_DIR "/test_gguf_dequant.c",
+        TESTS_DIR "/test_gguf_parse.c",
+        TESTS_DIR "/test_http.c",
+        TESTS_DIR "/test_safetensors.c",
+        TESTS_DIR "/test_pool_lru.c",
+        TESTS_DIR "/test_hf_download.c",
         NULL
     };
 
@@ -155,6 +163,63 @@ static int prepare_shared_disk(void) {
         return -1;
     }
 
+    /* Create format directory and copy GGUF parser files */
+    fat_mkdir(SHARED_IMAGE, "format");
+    const char *format_files[] = {
+        SRC_DIR "/format/gguf.h",
+        SRC_DIR "/format/gguf.c",
+        SRC_DIR "/format/safetensors.h",
+        SRC_DIR "/format/safetensors.c",
+        NULL
+    };
+    for (int i = 0; format_files[i]; i++) {
+        const char *src = format_files[i];
+        const char *name = strrchr(src, '/');
+        name = name ? name + 1 : src;
+        if (fat_copy_to_dir(SHARED_IMAGE, src, "format", name) != 0) {
+            fprintf(stderr, "Failed to copy %s\n", src);
+            return -1;
+        }
+    }
+
+    /* Create download directory and copy HTTP/HFHub files */
+    fat_mkdir(SHARED_IMAGE, "download");
+    const char *download_files[] = {
+        SRC_DIR "/download/http.h",
+        SRC_DIR "/download/http.c",
+        SRC_DIR "/download/hfhub.h",
+        SRC_DIR "/download/hfhub.c",
+        SRC_DIR "/download/cache.h",
+        SRC_DIR "/download/cache.c",
+        NULL
+    };
+    for (int i = 0; download_files[i]; i++) {
+        const char *src = download_files[i];
+        const char *name = strrchr(src, '/');
+        name = name ? name + 1 : src;
+        if (fat_copy_to_dir(SHARED_IMAGE, src, "download", name) != 0) {
+            fprintf(stderr, "Failed to copy %s\n", src);
+            return -1;
+        }
+    }
+
+    /* Create pool directory and copy pool files */
+    fat_mkdir(SHARED_IMAGE, "pool");
+    const char *pool_files[] = {
+        SRC_DIR "/pool/pool.h",
+        SRC_DIR "/pool/pool.c",
+        NULL
+    };
+    for (int i = 0; pool_files[i]; i++) {
+        const char *src = pool_files[i];
+        const char *name = strrchr(src, '/');
+        name = name ? name + 1 : src;
+        if (fat_copy_to_dir(SHARED_IMAGE, src, "pool", name) != 0) {
+            fprintf(stderr, "Failed to copy %s\n", src);
+            return -1;
+        }
+    }
+
     /* Copy model files if present */
     if (file_exists(MODEL_FILE)) {
         if (fat_copy_to(SHARED_IMAGE, MODEL_FILE, "stories15M.bin") != 0) {
@@ -169,6 +234,18 @@ static int prepare_shared_disk(void) {
     if (file_exists(TOKENIZER_FILE)) {
         if (fat_copy_to(SHARED_IMAGE, TOKENIZER_FILE, "tokenizer.bin") != 0) {
             fprintf(stderr, "Warning: failed to copy tokenizer file\n");
+        }
+    }
+
+    /* Copy GGUF test models if present */
+    if (file_exists(GGUF_Q4_FILE)) {
+        if (fat_copy_to(SHARED_IMAGE, GGUF_Q4_FILE, "tinyllama-15M-stories-Q4_0.gguf") != 0) {
+            fprintf(stderr, "Warning: failed to copy Q4_0 GGUF file\n");
+        }
+    }
+    if (file_exists(GGUF_Q8_FILE)) {
+        if (fat_copy_to(SHARED_IMAGE, GGUF_Q8_FILE, "tinyllama-15M-stories-Q8_0.gguf") != 0) {
+            fprintf(stderr, "Warning: failed to copy Q8_0 GGUF file\n");
         }
     }
 
@@ -231,13 +308,13 @@ static int run_vm_tests(void) {
      */
 
     /* Compile SIMD assembly first (needed by run.c, runq.c, benchmark, llmfs) */
-    run_vm_cmd("6a simd_amd64.s >[2=1] > simd_asm.log; echo asm_done", 30);
-    run_vm_cmd("6a simdq_amd64.s >[2=1] > simdq_asm.log; echo asm_done", 30);
+    run_vm_cmd("6a simd_amd64.s >[2=1] > simdasm.log; echo asm_done", 30);
+    run_vm_cmd("6a simdq_amd64.s >[2=1] > simdqasm.log; echo asm_done", 30);
 
     /* Compile arch plugin library (needed by run.c which includes model.c) */
     /* Use subshell @{} to avoid changing current directory */
-    run_vm_cmd("@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c } >[2=1] > arch_compile.log; echo arch_compile_done", 60);
-    run_vm_cmd("@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 } >[2=1] >> arch_compile.log; echo arch_lib_done", 30);
+    run_vm_cmd("@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c } >[2=1] > archcmp.log; echo arch_compile_done", 60);
+    run_vm_cmd("@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 } >[2=1] >> archcmp.log; echo arch_lib_done", 30);
 
     /* Compile and run each test (basic tests define DISABLE_THREADING in their source) */
     /* Tests that include model.c need arch/arch.a6 for arch plugin symbols */
@@ -252,8 +329,8 @@ static int run_vm_tests(void) {
     /* Generation test (needs model files) */
     /* Note: Plan 9 rc shell uses >[2] for stderr, not 2> */
     /* Link with simd_amd64.6 for SSE vectorized SIMD functions and arch.a6 for plugins */
-    run_vm_cmd("6c -w run.c >[2=1] > run_compile.log; echo run_compile_done", 60);
-    run_vm_cmd("6l -o run run.6 simd_amd64.6 arch/arch.a6 >[2=1] >> run_compile.log; echo run_link_done", 30);
+    run_vm_cmd("6c -w run.c >[2=1] > runcmp.log; echo run_compile_done", 60);
+    run_vm_cmd("6l -o run run.6 simd_amd64.6 arch/arch.a6 >[2=1] >> runcmp.log; echo run_link_done", 30);
     run_vm_cmd("./run stories15M.bin -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation.out >[2=1]", 120);
 
     /* Generation test WITH SIMD - must produce same output as scalar */
@@ -342,6 +419,37 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w test_softmax_accuracy.c", 60);
     run_vm_cmd("6l -o t_softmax_acc test_softmax_accuracy.6 simd_amd64.6 arch/arch.a6", 30);
     run_vm_cmd("./t_softmax_acc > softmax_accuracy.out >[2=1]", 300);
+
+    /* GGUF dequantization test (unit tests, no file needed) */
+    /* Need -Iformat so gguf.c can find gguf.h */
+    run_vm_cmd("6c -w -Iformat test_gguf_dequant.c", 60);
+    run_vm_cmd("6l -o t_gguf_dequant test_gguf_dequant.6", 30);
+    run_vm_cmd("./t_gguf_dequant > gguf_dequant.out >[2=1]", 60);
+
+    /* GGUF parse test (requires GGUF model file) */
+    /* Need -Iformat so gguf.c can find gguf.h */
+    run_vm_cmd("6c -w -Iformat test_gguf_parse.c", 60);
+    run_vm_cmd("6l -o t_gguf_parse test_gguf_parse.6", 30);
+    run_vm_cmd("./t_gguf_parse > gguf_parse.out >[2=1]", 120);
+
+    /* HTTP URL parsing test */
+    /* Need -Idownload so http.c can find http.h */
+    run_vm_cmd("6c -w -Idownload test_http.c >[2=1] > httpcmp.log; echo http_compiled", 60);
+    run_vm_cmd("6l -o t_http test_http.6 >[2=1] >> httpcmp.log; echo http_linked", 30);
+    run_vm_cmd("./t_http > http.out >[2=1]", 30);
+
+    /* Safetensors parsing test */
+    /* Need -Iformat so safetensors.c can find safetensors.h */
+    run_vm_cmd("6c -w -Iformat test_safetensors.c >[2=1] > safecmp.log; echo safe_compiled", 60);
+    run_vm_cmd("6l -o t_safetensors test_safetensors.6 >[2=1] >> safecmp.log; echo safe_linked", 30);
+    run_vm_cmd("./t_safetensors > safetens.out >[2=1]", 60);
+
+    /* Pool LRU test - includes model.c and pool/pool.c, needs arch library and SIMD */
+    run_vm_cmd("6c -w -Ipool test_pool_lru.c >[2=1] > poolcmp.log; echo pool_compiled", 120);
+    run_vm_cmd("6l -o t_pool_lru test_pool_lru.6 simd_amd64.6 arch/arch.a6 >[2=1] >> poolcmp.log; echo pool_linked", 30);
+    run_vm_cmd("./t_pool_lru > pool_lru.out >[2=1]", 120);
+
+    /* Note: hf_download test runs in separate internet-enabled VM (run_vm_hf_download) */
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -1290,6 +1398,388 @@ static void test_format_detect(void) {
     free(data);
 }
 
+/* Test: GGUF dequantization */
+static void test_gguf_dequant(void) {
+    printf("Testing gguf_dequant... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "gguf_dequant.out", &size);
+    if (!data || size == 0) {
+        add_result("gguf_dequant", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "dequantization tests passed") != NULL) {
+        add_result("gguf_dequant", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("gguf_dequant", 0, 0, "GGUF dequantization test failed");
+        printf("FAIL (GGUF dequantization test failed)\n");
+    } else {
+        add_result("gguf_dequant", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  GGUF dequant output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: GGUF parse */
+static void test_gguf_parse(void) {
+    printf("Testing gguf_parse... ");
+
+    /* Check if GGUF model file exists */
+    if (!file_exists(GGUF_Q4_FILE) && !file_exists(GGUF_Q8_FILE)) {
+        add_result("gguf_parse", 0, 1, "no GGUF model file found");
+        printf("SKIP (no GGUF model file found)\n");
+        return;
+    }
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "gguf_parse.out", &size);
+    if (!data || size == 0) {
+        add_result("gguf_parse", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for SKIP (model not found in VM) */
+    if (strstr(data, "SKIP:") != NULL) {
+        add_result("gguf_parse", 0, 1, "GGUF model not found in VM");
+        printf("SKIP (GGUF model not found in VM)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "parse tests passed") != NULL) {
+        add_result("gguf_parse", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("gguf_parse", 0, 0, "GGUF parse test failed");
+        printf("FAIL (GGUF parse test failed)\n");
+    } else {
+        add_result("gguf_parse", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  GGUF parse output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Using model") || strstr(line, "arch") ||
+            strstr(line, "dim:") || strstr(line, "n_layers")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: HTTP URL parsing */
+static void test_http(void) {
+    printf("Testing http... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "http.out", &size);
+    if (!data || size == 0) {
+        add_result("http", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "HTTP tests passed") != NULL) {
+        add_result("http", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("http", 0, 0, "HTTP test failed");
+        printf("FAIL (HTTP test failed)\n");
+    } else {
+        add_result("http", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  HTTP test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Result")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: Safetensors parsing */
+static void test_safetensors(void) {
+    printf("Testing safetensors... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "safetens.out", &size);
+    if (!data || size == 0) {
+        add_result("safetensors", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "safetensors tests passed") != NULL) {
+        add_result("safetensors", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("safetensors", 0, 0, "Safetensors test failed");
+        printf("FAIL (Safetensors test failed)\n");
+    } else {
+        add_result("safetensors", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Safetensors test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Result") || strstr(line, "Dtype") ||
+            strstr(line, "Shape")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: Pool LRU */
+static void test_pool_lru(void) {
+    printf("Testing pool_lru... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "pool_lru.out", &size);
+    if (!data || size == 0) {
+        /* Check compile log for errors */
+        char *log = fat_read_file(SHARED_IMAGE, "poolcmp.log", NULL);
+        if (log && strlen(log) > 0) {
+            add_result("pool_lru", 0, 0, "compilation failed");
+            printf("FAIL (compilation failed)\n");
+            printf("  Compile log: %s\n", log);
+            free(log);
+        } else {
+            add_result("pool_lru", 0, 0, "no output file - likely crashed");
+            printf("FAIL (no output - likely crashed)\n");
+        }
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "pool tests passed") != NULL) {
+        add_result("pool_lru", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("pool_lru", 0, 0, "Pool test failed");
+        printf("FAIL (Pool test failed)\n");
+    } else {
+        add_result("pool_lru", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Pool test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Result")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* HuggingFace download integration test - requires internet access */
+static QemuVM hf_vm;
+
+static void run_vm_hf_download(void) {
+    printf("\n==================================================\n");
+    printf("Running HuggingFace Download Integration Test\n");
+    printf("==================================================\n\n");
+
+    /* Start VM with internet access */
+    printf("Starting VM with internet access...\n");
+    if (qemu_start_with_internet(&hf_vm, DISK_IMAGE, SHARED_IMAGE) != 0) {
+        fprintf(stderr, "Failed to start internet-enabled VM\n");
+        return;
+    }
+
+    /* Wait for boot */
+    printf("Waiting for bootargs prompt...\n");
+    if (qemu_wait_for(&hf_vm, "bootargs", 60) != 0) {
+        fprintf(stderr, "Timeout waiting for bootargs\n");
+        qemu_shutdown(&hf_vm);
+        return;
+    }
+    qemu_sendln(&hf_vm, "");
+
+    printf("Waiting for user prompt...\n");
+    if (qemu_wait_for(&hf_vm, "user", 30) != 0) {
+        fprintf(stderr, "Timeout waiting for user prompt\n");
+        qemu_shutdown(&hf_vm);
+        return;
+    }
+    qemu_sendln(&hf_vm, "");
+
+    printf("Waiting for shell...\n");
+    if (qemu_wait_for(&hf_vm, "term%", 60) != 0) {
+        fprintf(stderr, "Timeout waiting for shell\n");
+        qemu_shutdown(&hf_vm);
+        return;
+    }
+
+    /* Mount shared disk */
+    printf("Mounting shared disk...\n");
+    qemu_sendln_wait(&hf_vm, "dossrv -f /dev/sdG0/data shared", 10);
+    qemu_sendln_wait(&hf_vm, "mount -c /srv/shared /mnt/host", 10);
+    qemu_sendln_wait(&hf_vm, "cd /mnt/host", 5);
+
+    /* Configure internet access */
+    printf("Configuring internet access...\n");
+    qemu_configure_internet(&hf_vm);
+
+    /* Create required directories */
+    qemu_sendln_wait(&hf_vm, "mkdir -p /tmp/hf_cache", 5);
+
+    /* Compile the SIMD assembly first */
+    printf("Compiling SIMD assembly...\n");
+    qemu_sendln_wait(&hf_vm, "6a simd_amd64.s >[2=1] > hfcmp.log; echo simd_done", 30);
+
+    /* Compile the arch library */
+    printf("Compiling arch library...\n");
+    qemu_sendln_wait(&hf_vm, "mkdir -p arch && cp arch/*.h arch/*.c arch/ 2>/dev/null", 5);
+    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/arch.c >[2=1] >> hfcmp.log", 30);
+    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/llama2.c >[2=1] >> hfcmp.log", 30);
+    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/llama3.c >[2=1] >> hfcmp.log", 30);
+    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/mistral.c >[2=1] >> hfcmp.log", 30);
+    qemu_sendln_wait(&hf_vm, "ar vu arch/arch.a6 arch/arch.6 arch/llama2.6 arch/llama3.6 arch/mistral.6 >[2=1] >> hfcmp.log; echo arch_done", 30);
+
+    /* Copy download files to current directory and compile there */
+    printf("Compiling download modules...\n");
+    qemu_sendln_wait(&hf_vm, "cp download/http.c download/http.h download/hfhub.c download/hfhub.h .", 5);
+    qemu_sendln_wait(&hf_vm, "6c -w http.c >[2=1] >> hfcmp.log; echo http_done", 30);
+    qemu_sendln_wait(&hf_vm, "6c -w hfhub.c >[2=1] >> hfcmp.log; echo hfhub_done", 30);
+
+    /* Compile the HF download test (uses model.c and pool.c, links with http/hfhub)
+     * Uses threadmain() for proper libthread integration */
+    printf("Compiling HF download test...\n");
+    qemu_sendln_wait(&hf_vm, "6c -w -Idownload -Ipool -I. test_hf_download.c >[2=1] >> hfcmp.log; echo hf_compiled", 120);
+    qemu_sendln_wait(&hf_vm, "6l -o t_hf_download test_hf_download.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6 >[2=1] >> hfcmp.log; echo hf_linked", 60);
+
+    /* Run the test (longer timeout for network operations and model download) */
+    printf("Running HF download test (this may take several minutes)...\n");
+    qemu_sendln_wait(&hf_vm, "./t_hf_download > hf_download.out >[2=1]", 600);
+
+    /* Mark completion */
+    qemu_sendln_wait(&hf_vm, "echo hf_done > hf_complete.txt", 2);
+
+    /* Shutdown */
+    printf("Shutting down internet VM...\n");
+    qemu_shutdown(&hf_vm);
+}
+
+/* Test: HuggingFace download */
+static void test_hf_download(void) {
+    printf("Testing hf_download... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "hf_download.out", &size);
+    if (!data || size == 0) {
+        /* Check compile log for errors */
+        char *log = fat_read_file(SHARED_IMAGE, "hfcmp.log", NULL);
+        if (log && strlen(log) > 0) {
+            add_result("hf_download", 0, 0, "compilation failed");
+            printf("FAIL (compilation failed)\n");
+            printf("  Compile log: %s\n", log);
+            free(log);
+        } else {
+            add_result("hf_download", 0, 0, "no output file");
+            printf("FAIL (no output)\n");
+        }
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: HuggingFace integration tests passed") != NULL) {
+        add_result("hf_download", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        /* Find specific failure reason */
+        if (strstr(data, "DNS not working") != NULL)
+            add_result("hf_download", 0, 0, "DNS resolution failed");
+        else if (strstr(data, "TLS not working") != NULL)
+            add_result("hf_download", 0, 0, "TLS connection failed");
+        else if (strstr(data, "Cannot reach gateway") != NULL)
+            add_result("hf_download", 0, 0, "Network gateway unreachable");
+        else if (strstr(data, "Download failed") != NULL)
+            add_result("hf_download", 0, 0, "Model download failed");
+        else
+            add_result("hf_download", 0, 0, "integration test failed");
+        printf("FAIL\n");
+    } else {
+        add_result("hf_download", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output - show all lines for debugging */
+    printf("  HuggingFace download test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        /* Show test progress and results */
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test:") ||
+            strstr(line, "Error") || strstr(line, "Resolved") ||
+            strstr(line, "Repository") || strstr(line, "Downloaded") ||
+            strstr(line, "Generated") || strstr(line, "Loaded")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
 /* Run llmfs tests in single VM (local mount) */
 static void run_vm_llmfs_local(void) {
     printf("\n==================================================\n");
@@ -1297,8 +1787,8 @@ static void run_vm_llmfs_local(void) {
     printf("==================================================\n\n");
 
     /* Compile llmfs - capture errors (SSE SIMD in simd_amd64.s, arch plugins) */
-    run_vm_cmd("6c -w llmfs.c >[2=1] > llmfs_compile.log; echo compile_done", 120);
-    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfs_compile.log; echo link_done", 60);
+    run_vm_cmd("6c -w llmfs.c >[2=1] > llmfscmp.log; echo compile_done", 120);
+    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
@@ -1342,7 +1832,7 @@ static void test_llmfs_local(void) {
 
     /* Check compile log for errors */
     int size;
-    char *compile_log = fat_read_file(SHARED_IMAGE, "llmfs_compile.log", &size);
+    char *compile_log = fat_read_file(SHARED_IMAGE, "llmfscmp.log", &size);
     if (compile_log && size > 0) {
         printf("\n  Compile log: %s\n", compile_log);
     }
@@ -1610,9 +2100,9 @@ int main(int argc, char *argv[]) {
         /* Already in test dir or running from project root */
     }
 
-    /* Kill any lingering QEMU */
+    /* Initialize VM tracking and clean up any orphaned VMs from previous crashes */
     printf("Cleaning up...\n");
-    qemu_killall();
+    qemu_tracker_init();
 
     /* Check for 9front disk */
     if (!file_exists(DISK_IMAGE)) {
@@ -1654,6 +2144,11 @@ int main(int argc, char *argv[]) {
         run_dualvm_llmfs_remote();
     }
 
+    /* Run HuggingFace download test (requires separate internet-enabled VM) */
+    if (should_run_test("hf_download")) {
+        run_vm_hf_download();
+    }
+
     /* Compare results */
     printf("\n==================================================\n");
     printf("Verifying Results\n");
@@ -1679,10 +2174,19 @@ int main(int argc, char *argv[]) {
     if (should_run_test("format_detect")) test_format_detect();
     if (should_run_test("softmax_benchmark")) test_softmax_benchmark();
     if (should_run_test("softmax_accuracy")) test_softmax_accuracy();
+    if (should_run_test("gguf_dequant")) test_gguf_dequant();
+    if (should_run_test("gguf_parse")) test_gguf_parse();
+    if (should_run_test("http")) test_http();
+    if (should_run_test("safetensors")) test_safetensors();
+    if (should_run_test("pool_lru")) test_pool_lru();
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
+    if (should_run_test("hf_download")) test_hf_download();
 
     print_summary();
+
+    /* Final cleanup */
+    qemu_tracker_cleanup();
 
     /* Return non-zero if any tests failed */
     for (int i = 0; i < num_results; i++) {

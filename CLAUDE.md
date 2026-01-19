@@ -62,25 +62,31 @@ mk clean      # Clean all build artifacts
 │   ├── model.c            # Model loading helpers
 │   ├── modelq.c           # Quantized model helpers
 │   ├── export.c           # Model export/conversion tool
-│   ├── llmfs.c            # 9P file server for remote inference
+│   ├── llmfs.c            # 9P file server for multi-model inference
 │   ├── simd.h             # SIMD function declarations
 │   ├── simd_amd64.s       # SSE2 assembly implementations
 │   ├── simdq_amd64.s      # Quantized SIMD (stub, uses C fallback)
 │   ├── parallel.h         # Thread pool declarations
 │   ├── parallel.c         # Thread pool implementation
+│   ├── arch/              # Model architecture plugins
+│   │   ├── arch.h         # Architecture interface
+│   │   ├── arch.c         # Plugin registry
+│   │   ├── llama2.c       # LLaMA 2 (rope_theta=10000)
+│   │   ├── llama3.c       # LLaMA 3 (rope_theta=500000)
+│   │   └── mistral.c      # Mistral (sliding window)
+│   ├── format/            # File format parsers
+│   │   ├── gguf.c         # GGUF format parser
+│   │   └── safetensors.c  # Safetensors parser
+│   ├── download/          # HuggingFace integration
+│   │   └── http.c         # HTTP client (dial + TLS)
+│   ├── pool/              # Model pool management
+│   │   ├── pool.h         # Pool interface
+│   │   └── pool.c         # LRU eviction, memory tracking
 │   ├── mkfile             # Plan 9 build file
 │   └── tests/             # Plan 9 test source files
 │       ├── mkfile         # Plan 9 test build file
-│       ├── test_rmsnorm.c
-│       ├── test_softmax.c
-│       ├── test_matmul.c
-│       ├── test_rng.c
-│       ├── test_model_loading.c
-│       ├── test_quantize.c
-│       ├── test_quantized_matmul.c
-│       ├── test_benchmark.c       # Performance benchmark
-│       ├── test_simd_validation.c # SIMD correctness tests
-│       └── test_simd_debug.c      # Minimal SIMD debug test
+│       ├── test_*.c       # Various unit tests
+│       └── ...
 ├── test/                  # C test harness (Linux host)
 │   ├── harness.c          # Main test driver (supports dual-VM testing)
 │   ├── reference.c/h      # Reference implementations
@@ -121,6 +127,7 @@ make test
 | rng | Random number generator (xorshift) |
 | model_loading | Config and weights loading |
 | generation | End-to-end text generation (FP32) |
+| generation_simd | FP32 generation with SIMD optimizations |
 | quantize | INT8 quantize/dequantize roundtrip |
 | quantized_matmul | Quantized matrix multiplication |
 | generation_quantized | End-to-end text generation (Q8_0, must match FP32) |
@@ -129,6 +136,18 @@ make test
 | benchmark | Performance benchmark (scalar vs SIMD vs threaded) |
 | simd_validation | SIMD correctness vs scalar baseline |
 | simd_debug | Minimal SIMD debug test |
+| softmax_simd | Softmax SIMD optimization tests |
+| rmsnorm_simd | RMSNorm SIMD optimization tests |
+| arch_detect | Architecture auto-detection from model file |
+| arch_llama3 | LLaMA 3 architecture (rope_theta=500000) |
+| format_detect | File format detection (native, GGUF, safetensors) |
+| softmax_benchmark | Softmax performance benchmark |
+| softmax_accuracy | Softmax numerical accuracy tests |
+| gguf_dequant | GGUF Q4_0/Q8_0 dequantization |
+| gguf_parse | GGUF header and metadata parsing |
+| http | HTTP client (Plan 9 dial) |
+| safetensors | Safetensors format parsing |
+| pool_lru | Model pool LRU eviction and reference counting |
 
 ---
 
@@ -291,17 +310,22 @@ Build on Plan 9:
 
 ## LLM File Server (llmfs)
 
-A 9P file server that exposes LLM inference as a Plan 9 filesystem, enabling distributed inference across machines.
+A 9P file server that exposes LLM inference as a Plan 9 filesystem, enabling distributed inference across machines. Supports multiple models with LRU eviction and per-session model binding.
 
 ### File System Structure
 
 ```
 /mnt/llm/
-    ctl             # RW: load/unload model, server status
+    ctl             # RW: load/unload model, pool commands, server status
     model           # R:  model info (dim, layers, vocab, memory)
     clone           # R:  read to create new session, returns ID
+    pool/           # Model pool directory
+        count       # R:  number of loaded models
+        memory      # R:  total memory used by pool (bytes)
+        list        # R:  comma-separated list of loaded model names
     0/              # Session 0 directory
         ctl         # RW: temp, topp, seed, steps, generate, reset
+        model       # RW: model name for this session (or "(default)")
         prompt      # W:  write prompt text
         output      # R:  complete output (blocks until done)
         stream      # R:  streaming output (returns tokens as generated)
@@ -390,8 +414,38 @@ cat /mnt/llm/0/output
 
 | Command | Description |
 |---------|-------------|
-| `load <model> <tokenizer>` | Load model and tokenizer |
-| `unload` | Unload current model |
+| `load <model> <tokenizer>` | Load default model and tokenizer |
+| `unload` | Unload default model |
+| `pool-load <name> <model> <tokenizer>` | Load model into pool with given name |
+| `pool-unload <name>` | Unload model from pool (fails if in use) |
+| `pool-limit <max_models> <max_memory>` | Set pool limits (models and bytes) |
+
+### Multi-Model Usage
+
+```rc
+# Load multiple models into the pool
+echo 'pool-load small stories15M.bin tokenizer.bin' > /mnt/llm/ctl
+echo 'pool-load large llama2-7b.bin tokenizer.bin' > /mnt/llm/ctl
+
+# Check pool status
+cat /mnt/llm/pool/count    # "2"
+cat /mnt/llm/pool/list     # "small,large"
+cat /mnt/llm/pool/memory   # Total memory used
+
+# Create session and bind to specific model
+session=`{cat /mnt/llm/clone}
+echo 'large' > /mnt/llm/$session/model
+
+# Generate using bound model
+echo 'Once upon a time' > /mnt/llm/$session/prompt
+echo 'generate' > /mnt/llm/$session/ctl
+cat /mnt/llm/$session/output
+
+# Check which model is bound
+cat /mnt/llm/$session/model    # "large"
+```
+
+The pool uses LRU eviction: when memory or model count limits are reached, the least recently used models with zero references are unloaded. Sessions hold references to their bound models, preventing eviction while in use.
 
 ---
 

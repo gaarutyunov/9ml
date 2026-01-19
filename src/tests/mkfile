@@ -9,6 +9,9 @@ TESTS=\
 	test_quantize\
 	test_quantized_matmul\
 	test_model_loading\
+	test_gguf_dequant\
+	test_http\
+	test_safetensors\
 
 # Benchmark test (requires SIMD assembly)
 BENCH=test_benchmark

@@ -1557,3 +1557,69 @@ void chat(Transformer *transformer, Tokenizer *tokenizer, Sampler *sampler,
     print("\n");
     free(prompt_tokens);
 }
+
+// ----------------------------------------------------------------------------
+// Model pool interface functions
+
+/*
+ * Load model and tokenizer into pre-allocated structs.
+ * Returns 0 on success, -1 on failure.
+ */
+int model_load(void *transformer, void *tokenizer, char *modelpath, char *tokenizerpath) {
+    Transformer *t = (Transformer *)transformer;
+    Tokenizer *tok = (Tokenizer *)tokenizer;
+
+    build_transformer(t, modelpath);
+    if (t->data == nil) {
+        return -1;
+    }
+
+    build_tokenizer(tok, tokenizerpath, t->config.vocab_size);
+    if (tok->vocab == nil) {
+        free_transformer(t);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * Free model and tokenizer resources.
+ */
+void model_free(void *transformer, void *tokenizer) {
+    if (transformer)
+        free_transformer((Transformer *)transformer);
+    if (tokenizer)
+        free_tokenizer((Tokenizer *)tokenizer);
+}
+
+/*
+ * Estimate memory usage of a loaded model.
+ */
+uvlong model_memory(void *transformer) {
+    Transformer *t = (Transformer *)transformer;
+    if (t == nil || t->data == nil)
+        return 0;
+
+    /* Memory = weights + RunState buffers */
+    uvlong weights = t->file_size;
+
+    /* RunState buffers (rough estimate based on config) */
+    Config *c = &t->config;
+    uvlong runstate = 0;
+    runstate += c->dim * sizeof(float);           /* x */
+    runstate += c->dim * sizeof(float);           /* xb */
+    runstate += c->dim * sizeof(float);           /* xb2 */
+    runstate += c->hidden_dim * sizeof(float);    /* hb */
+    runstate += c->hidden_dim * sizeof(float);    /* hb2 */
+    runstate += c->dim * sizeof(float);           /* q */
+    runstate += c->dim * sizeof(float);           /* k */
+    runstate += c->dim * sizeof(float);           /* v */
+    runstate += c->n_heads * c->seq_len * sizeof(float);  /* att */
+    runstate += c->vocab_size * sizeof(float);    /* logits */
+    /* KV cache */
+    runstate += c->n_layers * c->seq_len * c->dim * sizeof(float);  /* key_cache */
+    runstate += c->n_layers * c->seq_len * c->dim * sizeof(float);  /* value_cache */
+
+    return weights + runstate;
+}

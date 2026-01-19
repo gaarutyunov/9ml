@@ -1,0 +1,13 @@
+<$objtype/mkfile
+
+LIB=format.a$O
+
+OFILES=\
+	gguf.$O\
+	safetensors.$O\
+
+HFILES=\
+	gguf.h\
+	safetensors.h\
+
+</lib/mklib

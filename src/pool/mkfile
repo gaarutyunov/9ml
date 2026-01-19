@@ -1,0 +1,5 @@
+<mkfile
+
+OFILES=pool.$O
+
+</mkfile>

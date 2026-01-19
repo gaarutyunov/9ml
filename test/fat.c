@@ -7,22 +7,29 @@
 #include <sys/wait.h>
 
 int fat_create(const char *path, int size_mb) {
-    char cmd[512];
+    char cmd[1024];
 
     /* Remove existing file */
     unlink(path);
 
-    /* Create empty file */
-    snprintf(cmd, sizeof(cmd), "dd if=/dev/zero of=%s bs=1M count=%d status=none", path, size_mb);
+    /* Create image file with truncate (faster than dd) */
+    snprintf(cmd, sizeof(cmd), "truncate -s %dM %s", size_mb, path);
     if (system(cmd) != 0) {
-        fprintf(stderr, "fat_create: dd failed\n");
+        fprintf(stderr, "fat_create: truncate failed\n");
         return -1;
     }
 
-    /* Format as FAT32 */
-    snprintf(cmd, sizeof(cmd), "mkfs.vfat -F 32 %s >/dev/null 2>&1", path);
+    /* First zero out the first MB to ensure clean MBR/FAT area */
+    snprintf(cmd, sizeof(cmd), "dd if=/dev/zero of=%s bs=1M count=1 conv=notrunc status=none", path);
+    system(cmd);  /* Ignore errors */
+
+    /* Format as FAT32 using mformat.
+     * -F = FAT32 format
+     * Note: Don't specify cluster size as mformat will choose optimal settings.
+     */
+    snprintf(cmd, sizeof(cmd), "mformat -i %s -F :: 2>/dev/null", path);
     if (system(cmd) != 0) {
-        fprintf(stderr, "fat_create: mkfs.vfat failed\n");
+        fprintf(stderr, "fat_create: mformat failed\n");
         return -1;
     }
 
