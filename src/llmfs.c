@@ -23,7 +23,6 @@
  *   unload                             - unload model (legacy)
  *   pool-load <name> <model> <tok>     - load model into pool
  *   pool-unload <name>                 - unload model from pool
- *   pool-download <name> <repo> [rev]  - download from HuggingFace and load
  *   pool-limit <max_models> <max_mem>  - set pool limits
  */
 
@@ -32,10 +31,6 @@
 
 /* Include pool implementation */
 #include "pool/pool.c"
-
-/* Include download headers (implementations compiled separately) */
-#include "download/http.h"
-#include "download/hfhub.h"
 
 /* Additional headers for 9P server */
 #include <fcall.h>
@@ -963,120 +958,6 @@ fswrite(Req *r)
 				respond(r, "model not found or in use");
 				return;
 			}
-			r->ofcall.count = r->ifcall.count;
-			respond(r, nil);
-			return;
-		}
-		if (strncmp(buf, "pool-download ", 14) == 0) {
-			char *args = buf + 14;
-			char *name, *repo, *revision;
-			HFHub hub;
-			HFModel model;
-			HFFile *files, *binfile, *tokfile, *f;
-			char localpath[256], tokpath[256];
-			static char errbuf[256];
-			char *errmsg = nil;
-			PoolEntry *e;
-			int have_model = 0, have_files = 0;
-
-			/* Parse: pool-download <name> <repo> [revision] */
-			name = args;
-			while (*name == ' ')
-				name++;
-			repo = strchr(name, ' ');
-			if (repo == nil) {
-				respond(r, "usage: pool-download <name> <repo> [revision]");
-				return;
-			}
-			*repo++ = '\0';
-			while (*repo == ' ')
-				repo++;
-
-			/* Optional revision (default: main) */
-			revision = strchr(repo, ' ');
-			if (revision != nil) {
-				*revision++ = '\0';
-				while (*revision == ' ')
-					revision++;
-			} else {
-				revision = "main";
-			}
-
-			/* Initialize HuggingFace client */
-			hf_init(&hub, "/tmp/hf_cache");
-
-			/* Get model info */
-			if (hf_get_model_info(&hub, repo, revision, &model) < 0) {
-				snprint(errbuf, sizeof errbuf, "cannot get model info: %s", hub.errmsg);
-				errmsg = errbuf;
-				goto hf_cleanup;
-			}
-			have_model = 1;
-
-			/* Find .bin files */
-			files = hf_find_files(&model, ".bin");
-			if (files == nil) {
-				errmsg = "no .bin files found in repository";
-				goto hf_cleanup;
-			}
-			have_files = 1;
-
-			/* Find tokenizer.bin and smallest model .bin file */
-			tokfile = nil;
-			binfile = nil;
-			for (f = files; f != nil; f = f->next) {
-				if (strcmp(f->filename, "tokenizer.bin") == 0) {
-					tokfile = f;
-				} else if (binfile == nil || (f->size > 0 && f->size < binfile->size)) {
-					binfile = f;
-				}
-			}
-
-			if (binfile == nil) {
-				errmsg = "no model .bin files found (only tokenizer.bin)";
-				goto hf_cleanup;
-			}
-
-			/* Download tokenizer if present, otherwise use default */
-			if (tokfile != nil) {
-				snprint(tokpath, sizeof tokpath, "/tmp/hf_%s_tok.bin", name);
-				if (hf_download_file_to(&hub, &model, tokfile, tokpath, nil, nil) < 0) {
-					snprint(errbuf, sizeof errbuf, "tokenizer download failed: %s", hub.errmsg);
-					errmsg = errbuf;
-					goto hf_cleanup;
-				}
-			} else {
-				snprint(tokpath, sizeof tokpath, "tokenizer.bin");
-			}
-
-			/* Download model file */
-			snprint(localpath, sizeof localpath, "/tmp/hf_%s.bin", name);
-			if (hf_download_file_to(&hub, &model, binfile, localpath, nil, nil) < 0) {
-				snprint(errbuf, sizeof errbuf, "model download failed: %s", hub.errmsg);
-				errmsg = errbuf;
-				goto hf_cleanup;
-			}
-
-		hf_cleanup:
-			if (have_files)
-				hf_files_free(files);
-			if (have_model)
-				hf_model_free(&model);
-			hf_close(&hub);
-
-			if (errmsg != nil) {
-				respond(r, errmsg);
-				return;
-			}
-
-			/* Load into pool */
-			e = pool_load(&server.pool, name, localpath, tokpath);
-			if (e == nil) {
-				respond(r, "failed to load downloaded model");
-				return;
-			}
-			pool_release(&server.pool, e);
-
 			r->ofcall.count = r->ifcall.count;
 			respond(r, nil);
 			return;

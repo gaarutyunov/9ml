@@ -77,8 +77,6 @@ mk clean      # Clean all build artifacts
 │   ├── format/            # File format parsers
 │   │   ├── gguf.c         # GGUF format parser
 │   │   └── safetensors.c  # Safetensors parser
-│   ├── download/          # HuggingFace integration
-│   │   └── http.c         # HTTP client (dial + TLS)
 │   ├── pool/              # Model pool management
 │   │   ├── pool.h         # Pool interface
 │   │   └── pool.c         # LRU eviction, memory tracking
@@ -446,6 +444,32 @@ cat /mnt/llm/$session/model    # "large"
 ```
 
 The pool uses LRU eviction: when memory or model count limits are reached, the least recently used models with zero references are unloaded. Sessions hold references to their bound models, preventing eviction while in use.
+
+### Downloading Models
+
+HuggingFace integration for automatic model downloads is not yet available. HuggingFace now uses git-lfs and the xet format for model storage, which requires additional tooling support.
+
+To use models with 9ml:
+
+1. **Download manually** from HuggingFace website or using `huggingface-cli`:
+   ```bash
+   # Install huggingface-cli
+   pip install huggingface-hub
+
+   # Download a model
+   huggingface-cli download karpathy/tinyllamas --include "*.bin"
+   ```
+
+2. **Copy to shared disk** for use in Plan 9:
+   ```bash
+   # Copy model files to the FAT shared disk
+   mcopy -i qemu/shared.img model.bin tokenizer.bin ::
+   ```
+
+3. **Load in Plan 9** via llmfs:
+   ```rc
+   echo 'pool-load mymodel /mnt/host/model.bin /mnt/host/tokenizer.bin' > /mnt/llm/ctl
+   ```
 
 ---
 

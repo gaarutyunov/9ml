@@ -119,10 +119,8 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_softmax_accuracy.c",
         TESTS_DIR "/test_gguf_dequant.c",
         TESTS_DIR "/test_gguf_parse.c",
-        TESTS_DIR "/test_http.c",
         TESTS_DIR "/test_safetensors.c",
         TESTS_DIR "/test_pool_lru.c",
-        TESTS_DIR "/test_hf_download.c",
         NULL
     };
 
@@ -177,27 +175,6 @@ static int prepare_shared_disk(void) {
         const char *name = strrchr(src, '/');
         name = name ? name + 1 : src;
         if (fat_copy_to_dir(SHARED_IMAGE, src, "format", name) != 0) {
-            fprintf(stderr, "Failed to copy %s\n", src);
-            return -1;
-        }
-    }
-
-    /* Create download directory and copy HTTP/HFHub files */
-    fat_mkdir(SHARED_IMAGE, "download");
-    const char *download_files[] = {
-        SRC_DIR "/download/http.h",
-        SRC_DIR "/download/http.c",
-        SRC_DIR "/download/hfhub.h",
-        SRC_DIR "/download/hfhub.c",
-        SRC_DIR "/download/cache.h",
-        SRC_DIR "/download/cache.c",
-        NULL
-    };
-    for (int i = 0; download_files[i]; i++) {
-        const char *src = download_files[i];
-        const char *name = strrchr(src, '/');
-        name = name ? name + 1 : src;
-        if (fat_copy_to_dir(SHARED_IMAGE, src, "download", name) != 0) {
             fprintf(stderr, "Failed to copy %s\n", src);
             return -1;
         }
@@ -432,12 +409,6 @@ static int run_vm_tests(void) {
     run_vm_cmd("6l -o t_gguf_parse test_gguf_parse.6", 30);
     run_vm_cmd("./t_gguf_parse > gguf_parse.out >[2=1]", 120);
 
-    /* HTTP URL parsing test */
-    /* Need -Idownload so http.c can find http.h */
-    run_vm_cmd("6c -w -Idownload test_http.c >[2=1] > httpcmp.log; echo http_compiled", 60);
-    run_vm_cmd("6l -o t_http test_http.6 >[2=1] >> httpcmp.log; echo http_linked", 30);
-    run_vm_cmd("./t_http > http.out >[2=1]", 30);
-
     /* Safetensors parsing test */
     /* Need -Iformat so safetensors.c can find safetensors.h */
     run_vm_cmd("6c -w -Iformat test_safetensors.c >[2=1] > safecmp.log; echo safe_compiled", 60);
@@ -448,8 +419,6 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w -Ipool test_pool_lru.c >[2=1] > poolcmp.log; echo pool_compiled", 120);
     run_vm_cmd("6l -o t_pool_lru test_pool_lru.6 simd_amd64.6 arch/arch.a6 >[2=1] >> poolcmp.log; echo pool_linked", 30);
     run_vm_cmd("./t_pool_lru > pool_lru.out >[2=1]", 120);
-
-    /* Note: hf_download test runs in separate internet-enabled VM (run_vm_hf_download) */
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -1495,47 +1464,6 @@ static void test_gguf_parse(void) {
     free(data);
 }
 
-/* Test: HTTP URL parsing */
-static void test_http(void) {
-    printf("Testing http... ");
-
-    int size;
-    char *data = fat_read_file(SHARED_IMAGE, "http.out", &size);
-    if (!data || size == 0) {
-        add_result("http", 0, 0, "no output file - likely crashed");
-        printf("FAIL (no output - likely crashed)\n");
-        free(data);
-        return;
-    }
-
-    /* Check for PASS/FAIL in output */
-    if (strstr(data, "PASS: All") != NULL && strstr(data, "HTTP tests passed") != NULL) {
-        add_result("http", 1, 0, NULL);
-        printf("PASS\n");
-    } else if (strstr(data, "FAIL") != NULL) {
-        add_result("http", 0, 0, "HTTP test failed");
-        printf("FAIL (HTTP test failed)\n");
-    } else {
-        add_result("http", 0, 0, "unknown result");
-        printf("FAIL (unknown result)\n");
-    }
-
-    /* Print detailed output */
-    printf("  HTTP test output:\n");
-    char *data_copy = strdup(data);
-    char *line = strtok(data_copy, "\n");
-    while (line) {
-        if (strstr(line, "===") || strstr(line, "PASS") ||
-            strstr(line, "FAIL") || strstr(line, "Test") ||
-            strstr(line, "Result")) {
-            printf("    %s\n", line);
-        }
-        line = strtok(NULL, "\n");
-    }
-    free(data_copy);
-    free(data);
-}
-
 /* Test: Safetensors parsing */
 static void test_safetensors(void) {
     printf("Testing safetensors... ");
@@ -1628,313 +1556,15 @@ static void test_pool_lru(void) {
     free(data);
 }
 
-/* HuggingFace download integration test - requires internet access */
-static QemuVM hf_vm;
-
-static void run_vm_hf_download(void) {
-    printf("\n==================================================\n");
-    printf("Running HuggingFace Download Integration Test\n");
-    printf("==================================================\n\n");
-
-    /* Start VM with internet access */
-    printf("Starting VM with internet access...\n");
-    if (qemu_start_with_internet(&hf_vm, DISK_IMAGE, SHARED_IMAGE) != 0) {
-        fprintf(stderr, "Failed to start internet-enabled VM\n");
-        return;
-    }
-
-    /* Wait for boot */
-    printf("Waiting for bootargs prompt...\n");
-    if (qemu_wait_for(&hf_vm, "bootargs", 60) != 0) {
-        fprintf(stderr, "Timeout waiting for bootargs\n");
-        qemu_shutdown(&hf_vm);
-        return;
-    }
-    qemu_sendln(&hf_vm, "");
-
-    printf("Waiting for user prompt...\n");
-    if (qemu_wait_for(&hf_vm, "user", 30) != 0) {
-        fprintf(stderr, "Timeout waiting for user prompt\n");
-        qemu_shutdown(&hf_vm);
-        return;
-    }
-    qemu_sendln(&hf_vm, "");
-
-    printf("Waiting for shell...\n");
-    if (qemu_wait_for(&hf_vm, "term%", 60) != 0) {
-        fprintf(stderr, "Timeout waiting for shell\n");
-        qemu_shutdown(&hf_vm);
-        return;
-    }
-
-    /* Mount shared disk */
-    printf("Mounting shared disk...\n");
-    qemu_sendln_wait(&hf_vm, "dossrv -f /dev/sdG0/data shared", 10);
-    qemu_sendln_wait(&hf_vm, "mount -c /srv/shared /mnt/host", 10);
-    qemu_sendln_wait(&hf_vm, "cd /mnt/host", 5);
-
-    /* Configure internet access */
-    printf("Configuring internet access...\n");
-    qemu_configure_internet(&hf_vm);
-
-    /* Create required directories */
-    qemu_sendln_wait(&hf_vm, "mkdir -p /tmp/hf_cache", 5);
-
-    /* Compile the SIMD assembly first */
-    printf("Compiling SIMD assembly...\n");
-    qemu_sendln_wait(&hf_vm, "6a simd_amd64.s >[2=1] > hfcmp.log; echo simd_done", 30);
-
-    /* Compile the arch library */
-    printf("Compiling arch library...\n");
-    qemu_sendln_wait(&hf_vm, "mkdir -p arch && cp arch/*.h arch/*.c arch/ 2>/dev/null", 5);
-    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/arch.c >[2=1] >> hfcmp.log", 30);
-    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/llama2.c >[2=1] >> hfcmp.log", 30);
-    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/llama3.c >[2=1] >> hfcmp.log", 30);
-    qemu_sendln_wait(&hf_vm, "6c -w -I. arch/mistral.c >[2=1] >> hfcmp.log", 30);
-    qemu_sendln_wait(&hf_vm, "ar vu arch/arch.a6 arch/arch.6 arch/llama2.6 arch/llama3.6 arch/mistral.6 >[2=1] >> hfcmp.log; echo arch_done", 30);
-
-    /* Copy download files to current directory and compile there */
-    printf("Compiling download modules...\n");
-    qemu_sendln_wait(&hf_vm, "cp download/http.c download/http.h download/hfhub.c download/hfhub.h .", 5);
-    qemu_sendln_wait(&hf_vm, "6c -w http.c >[2=1] >> hfcmp.log; echo http_done", 30);
-    qemu_sendln_wait(&hf_vm, "6c -w hfhub.c >[2=1] >> hfcmp.log; echo hfhub_done", 30);
-
-    /* Compile the HF download test (uses model.c and pool.c, links with http/hfhub)
-     * Uses threadmain() for proper libthread integration */
-    printf("Compiling HF download test...\n");
-    qemu_sendln_wait(&hf_vm, "6c -w -Idownload -Ipool -I. test_hf_download.c >[2=1] >> hfcmp.log; echo hf_compiled", 120);
-    qemu_sendln_wait(&hf_vm, "6l -o t_hf_download test_hf_download.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6 >[2=1] >> hfcmp.log; echo hf_linked", 60);
-
-    /* Run the test (longer timeout for network operations and model download) */
-    printf("Running HF download test (this may take several minutes)...\n");
-    qemu_sendln_wait(&hf_vm, "./t_hf_download > hf_download.out >[2=1]", 600);
-
-    /* Mark completion */
-    qemu_sendln_wait(&hf_vm, "echo hf_done > hf_complete.txt", 2);
-
-    /* Test llmfs pool-download command */
-    printf("\n--- Testing llmfs pool-download ---\n");
-
-    /* Compile llmfs with download modules */
-    printf("Compiling llmfs with download modules...\n");
-    qemu_sendln_wait(&hf_vm, "6c -w -Idownload llmfs.c >[2=1] > llmfs_dl.log; echo llmfs_compiled", 120);
-    qemu_sendln_wait(&hf_vm, "6l -o llmfs llmfs.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfs_dl.log; echo llmfs_linked", 60);
-
-    /* Start llmfs and mount - add debugging */
-    printf("Starting llmfs...\n");
-    qemu_sendln_wait(&hf_vm, "echo 'starting llmfs' >> llmfs_debug.out", 2);
-    qemu_sendln_wait(&hf_vm, "./llmfs -s llm >[2=1] >> llmfs_debug.out &", 5);
-    qemu_sendln_wait(&hf_vm, "sleep 3", 4);
-    qemu_sendln_wait(&hf_vm, "echo 'checking srv' >> llmfs_debug.out; ls /srv >> llmfs_debug.out 2>&1", 5);
-    qemu_sendln_wait(&hf_vm, "mount -c /srv/llm /mnt/llm >[2=1] >> llmfs_debug.out; echo mount_status_$status >> llmfs_debug.out", 5);
-
-    /* Check llmfs is mounted */
-    printf("Checking llmfs is mounted...\n");
-    qemu_sendln_wait(&hf_vm, "ls /mnt/llm > llmfs_ls.out 2>&1; echo ls_done", 5);
-
-    /* Test pool-download command - downloads tokenizer + model from HuggingFace */
-    printf("Testing pool-download (downloading from HuggingFace via llmfs)...\n");
-    qemu_sendln_wait(&hf_vm, "echo 'pool-download tinyllama karpathy/tinyllamas' > /mnt/llm/ctl; echo pool_download_exit_$status > llmfs_download_status.out", 900);
-
-    /* Check pool list */
-    printf("Checking pool list...\n");
-    qemu_sendln_wait(&hf_vm, "cat /mnt/llm/pool/list > llmfs_pool_list.out 2>&1; echo pool_list_done", 5);
-    qemu_sendln_wait(&hf_vm, "cat /mnt/llm/pool/count > llmfs_pool_count.out 2>&1; echo pool_count_done", 5);
-
-    /* Create session and generate with downloaded model */
-    printf("Generating text with downloaded model via llmfs...\n");
-    qemu_sendln_wait(&hf_vm, "cat /mnt/llm/clone > /tmp/sess", 5);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'model tinyllama' > /mnt/llm/$sess/ctl", 5);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'temp 0.0' > /mnt/llm/$sess/ctl", 5);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'steps 20' > /mnt/llm/$sess/ctl", 5);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'Once upon a time' > /mnt/llm/$sess/prompt", 5);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; echo 'generate' > /mnt/llm/$sess/ctl", 5);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; cat /mnt/llm/$sess/output > llmfs_dl_output.out", 120);
-    qemu_sendln_wait(&hf_vm, "sess=`{cat /tmp/sess}; cat /mnt/llm/$sess/status > llmfs_dl_status.out", 5);
-
-    /* Mark llmfs download test completion */
-    qemu_sendln_wait(&hf_vm, "echo llmfs_dl_done > llmfs_dl_complete.txt", 2);
-
-    /* Shutdown */
-    printf("Shutting down internet VM...\n");
-    qemu_shutdown(&hf_vm);
-}
-
-/* Test: HuggingFace download */
-static void test_hf_download(void) {
-    printf("Testing hf_download... ");
-
-    int size;
-    char *data = fat_read_file(SHARED_IMAGE, "hf_download.out", &size);
-    if (!data || size == 0) {
-        /* Check compile log for errors */
-        char *log = fat_read_file(SHARED_IMAGE, "hfcmp.log", NULL);
-        if (log && strlen(log) > 0) {
-            add_result("hf_download", 0, 0, "compilation failed");
-            printf("FAIL (compilation failed)\n");
-            printf("  Compile log: %s\n", log);
-            free(log);
-        } else {
-            add_result("hf_download", 0, 0, "no output file");
-            printf("FAIL (no output)\n");
-        }
-        free(data);
-        return;
-    }
-
-    /* Check for PASS/FAIL in output */
-    if (strstr(data, "PASS: HuggingFace integration tests passed") != NULL) {
-        add_result("hf_download", 1, 0, NULL);
-        printf("PASS\n");
-    } else if (strstr(data, "FAIL") != NULL) {
-        /* Find specific failure reason */
-        if (strstr(data, "DNS not working") != NULL)
-            add_result("hf_download", 0, 0, "DNS resolution failed");
-        else if (strstr(data, "TLS not working") != NULL)
-            add_result("hf_download", 0, 0, "TLS connection failed");
-        else if (strstr(data, "Cannot reach gateway") != NULL)
-            add_result("hf_download", 0, 0, "Network gateway unreachable");
-        else if (strstr(data, "Download failed") != NULL)
-            add_result("hf_download", 0, 0, "Model download failed");
-        else
-            add_result("hf_download", 0, 0, "integration test failed");
-        printf("FAIL\n");
-    } else {
-        add_result("hf_download", 0, 0, "unknown result");
-        printf("FAIL (unknown result)\n");
-    }
-
-    /* Print detailed output - show all lines for debugging */
-    printf("  HuggingFace download test output:\n");
-    char *data_copy = strdup(data);
-    char *line = strtok(data_copy, "\n");
-    while (line) {
-        /* Show test progress and results */
-        if (strstr(line, "===") || strstr(line, "PASS") ||
-            strstr(line, "FAIL") || strstr(line, "Test:") ||
-            strstr(line, "Error") || strstr(line, "Resolved") ||
-            strstr(line, "Repository") || strstr(line, "Downloaded") ||
-            strstr(line, "Generated") || strstr(line, "Loaded")) {
-            printf("    %s\n", line);
-        }
-        line = strtok(NULL, "\n");
-    }
-    free(data_copy);
-    free(data);
-}
-
-/* Helper: Read and print debug file if present */
-static void print_debug_file(const char *filename, const char *label, const char *fallback_msg) {
-    int size;
-    char *data = fat_read_file(SHARED_IMAGE, filename, &size);
-    if (data && size > 0) {
-        printf("  %s: %s\n", label, data);
-    } else if (fallback_msg) {
-        printf("  %s: %s\n", label, fallback_msg);
-    }
-    free(data);
-}
-
-/* Test: llmfs pool-download integration */
-static void test_llmfs_download(void) {
-    printf("Testing llmfs_download... ");
-
-    /* Print debug files (even if test did not complete) */
-    int size;
-    char *log = fat_read_file(SHARED_IMAGE, "llmfs_dl.log", &size);
-    if (log && size > 0) {
-        printf("\n  Compile log: %s\n", log);
-    }
-    free(log);
-
-    print_debug_file("llmfs_debug.out", "llmfs debug", NULL);
-    print_debug_file("llmfs_ls.out", "llmfs ls", "(no output - llmfs may not have started)");
-    print_debug_file("llmfs_download_status.out", "Download status", "(no output - pool-download may have hung)");
-
-    /* Check if the llmfs download test completed */
-    char *data = fat_read_file(SHARED_IMAGE, "llmfs_dl_complete.txt", &size);
-    if (!data || size == 0) {
-        add_result("llmfs_download", 0, 1, "llmfs download test not run");
-        printf("SKIP (llmfs download test not run)\n");
-        free(data);
-        return;
-    }
-    free(data);
-
-    /* Check pool list for our model */
-    data = fat_read_file(SHARED_IMAGE, "llmfs_pool_list.out", &size);
-    if (!data || size == 0) {
-        add_result("llmfs_download", 0, 0, "no pool list output");
-        printf("FAIL (no pool list output)\n");
-        free(data);
-        return;
-    }
-
-    if (strstr(data, "tinyllama") == NULL) {
-        add_result("llmfs_download", 0, 0, "model not in pool");
-        printf("FAIL (model not in pool)\n");
-        printf("  Pool list: %s\n", data);
-        free(data);
-        return;
-    }
-    printf("Model found in pool\n");
-    free(data);
-
-    print_debug_file("llmfs_pool_count.out", "Pool count", NULL);
-
-    /* Check generation output */
-    data = fat_read_file(SHARED_IMAGE, "llmfs_dl_output.out", &size);
-    if (!data || size == 0) {
-        add_result("llmfs_download", 0, 0, "no generation output");
-        printf("FAIL (no generation output)\n");
-        free(data);
-        return;
-    }
-
-    if (size < 20) {
-        add_result("llmfs_download", 0, 0, "output too short");
-        printf("FAIL (output too short: %d chars)\n", size);
-        printf("  Output: %s\n", data);
-        free(data);
-        return;
-    }
-
-    printf("  Generation output (%d chars): %.100s%s\n",
-           size, data, size > 100 ? "..." : "");
-    free(data);
-
-    /* Check status */
-    data = fat_read_file(SHARED_IMAGE, "llmfs_dl_status.out", &size);
-    if (!data || size == 0) {
-        add_result("llmfs_download", 0, 0, "no status output");
-        printf("FAIL (no status output)\n");
-        free(data);
-        return;
-    }
-
-    if (strstr(data, "done") != NULL) {
-        printf("  Status: %s", data);
-        add_result("llmfs_download", 1, 0, NULL);
-        printf("PASS\n");
-    } else {
-        add_result("llmfs_download", 0, 0, "generation not complete");
-        printf("FAIL (generation not complete)\n");
-        printf("  Status: %s\n", data);
-    }
-    free(data);
-}
-
 /* Run llmfs tests in single VM (local mount) */
 static void run_vm_llmfs_local(void) {
     printf("\n==================================================\n");
     printf("Running llmfs local tests in Plan 9...\n");
     printf("==================================================\n\n");
 
-    /* Compile llmfs - capture errors (SSE SIMD, arch plugins, download modules) */
-    run_vm_cmd("6c -w -Idownload download/http.c >[2=1] > llmfscmp.log; echo http_done", 30);
-    run_vm_cmd("6c -w -Idownload download/hfhub.c >[2=1] >> llmfscmp.log; echo hfhub_done", 30);
-    run_vm_cmd("6c -w -Idownload llmfs.c >[2=1] >> llmfscmp.log; echo compile_done", 120);
-    run_vm_cmd("6l -o llmfs llmfs.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
+    /* Compile llmfs - capture errors (SSE SIMD, arch plugins) */
+    run_vm_cmd("6c -w llmfs.c >[2=1] > llmfscmp.log; echo compile_done", 120);
+    run_vm_cmd("6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6 >[2=1] >> llmfscmp.log; echo link_done", 60);
 
     /* Start llmfs and mount locally */
     run_vm_cmd("./llmfs -s llm &", 5);
@@ -2070,13 +1700,11 @@ static int run_dualvm_llmfs_remote(void) {
     qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c }", 60);
     qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 }", 30);
 
-    /* CPU VM: Compile llmfs (SSE SIMD, arch plugins, download modules) */
+    /* CPU VM: Compile llmfs (SSE SIMD, arch plugins) */
     printf("CPU: Compiling llmfs...\n");
     qemu_sendln_wait(&dualvm.cpu, "6a simd_amd64.s", 30);
-    qemu_sendln_wait(&dualvm.cpu, "6c -w -Idownload download/http.c", 30);
-    qemu_sendln_wait(&dualvm.cpu, "6c -w -Idownload download/hfhub.c", 30);
-    qemu_sendln_wait(&dualvm.cpu, "6c -w -Idownload llmfs.c", 120);
-    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 http.6 hfhub.6 simd_amd64.6 arch/arch.a6", 60);
+    qemu_sendln_wait(&dualvm.cpu, "6c -w llmfs.c", 120);
+    qemu_sendln_wait(&dualvm.cpu, "6l -o llmfs llmfs.6 simd_amd64.6 arch/arch.a6", 60);
 
     /* CPU VM: Start llmfs server and mount it locally */
     printf("CPU: Starting llmfs server...\n");
@@ -2292,11 +1920,6 @@ int main(int argc, char *argv[]) {
         run_dualvm_llmfs_remote();
     }
 
-    /* Run HuggingFace download test (requires separate internet-enabled VM) */
-    if (should_run_test("hf_download")) {
-        run_vm_hf_download();
-    }
-
     /* Compare results */
     printf("\n==================================================\n");
     printf("Verifying Results\n");
@@ -2324,13 +1947,10 @@ int main(int argc, char *argv[]) {
     if (should_run_test("softmax_accuracy")) test_softmax_accuracy();
     if (should_run_test("gguf_dequant")) test_gguf_dequant();
     if (should_run_test("gguf_parse")) test_gguf_parse();
-    if (should_run_test("http")) test_http();
     if (should_run_test("safetensors")) test_safetensors();
     if (should_run_test("pool_lru")) test_pool_lru();
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
-    if (should_run_test("hf_download")) test_hf_download();
-    if (should_run_test("llmfs_download")) test_llmfs_download();
 
     print_summary();
 
