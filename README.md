@@ -113,6 +113,178 @@ make export
 ./export quantize stories15M.bin stories15M_q80.bin
 ```
 
+## LLM File Server (llmfs)
+
+llmfs is a 9P file server that exposes LLM inference as a Plan 9 filesystem. This enables distributed inference where a powerful server runs the model and thin clients access it over the network.
+
+### File System Structure
+
+```
+/mnt/llm/
+    ctl             # RW: load/unload model, server status
+    model           # R:  model info (dim, layers, vocab, memory)
+    clone           # R:  read to create new session, returns ID
+    0/              # Session 0 directory
+        ctl         # RW: temp, topp, seed, steps, generate, reset
+        prompt      # W:  write prompt text
+        output      # R:  complete output (blocks until done)
+        stream      # R:  streaming output (returns tokens as generated)
+        status      # R:  idle|generating N/M|done tok/s|error msg
+    1/              # Session 1...
+```
+
+### Building llmfs
+
+In Plan 9:
+```rc
+cd /usr/glenda/9ml/src
+mk llmfs
+```
+
+To install globally:
+```rc
+cp llmfs /amd64/bin/
+```
+
+### Local Usage
+
+```rc
+# Start the file server
+llmfs -s llm
+
+# Mount it
+mount /srv/llm /mnt/llm
+
+# Load a model
+echo 'load stories15M.bin tokenizer.bin' > /mnt/llm/ctl
+
+# Check model info
+cat /mnt/llm/model
+
+# Create a session
+session=`{cat /mnt/llm/clone}
+
+# Configure session
+echo 'temp 0.0' > /mnt/llm/$session/ctl
+echo 'steps 50' > /mnt/llm/$session/ctl
+
+# Set prompt and generate
+echo 'Once upon a time' > /mnt/llm/$session/prompt
+echo 'generate' > /mnt/llm/$session/ctl
+
+# Read output (blocks until complete)
+cat /mnt/llm/$session/output
+
+# Check status
+cat /mnt/llm/$session/status
+```
+
+### Remote Usage with Drawterm
+
+This setup allows you to run llmfs on a remote server and access it from your local machine using drawterm.
+
+#### Server Setup (9front in QEMU)
+
+1. **Start QEMU with port forwarding:**
+```bash
+qemu-system-x86_64 -m 1024 -cpu max -enable-kvm \
+  -drive file=9front.qcow2,format=qcow2,if=virtio \
+  -device virtio-net-pci,netdev=net0 \
+  -netdev user,id=net0,hostfwd=tcp::9564-:564,hostfwd=tcp::17019-:17019 \
+  -vnc :1
+```
+
+2. **Boot 9front and configure network:**
+```rc
+# Accept defaults at boot prompts (press Enter twice)
+# Configure network (QEMU user networking)
+ip/ipconfig -6
+```
+
+3. **Set up authentication (factotum):**
+```rc
+# Add authentication key
+echo 'key proto=dp9ik dom=llmfs user=glenda !password=yourpassword' > /mnt/factotum/ctl
+```
+
+4. **Start CPU listener:**
+```rc
+# Create service script
+mkdir -p /rc/bin/service
+cat > /rc/bin/service/tcp17019 <<'EOF'
+#!/bin/rc
+exec /bin/cpu -R
+EOF
+chmod +x /rc/bin/service/tcp17019
+
+# Start listener
+aux/listen1 -t tcp!*!17019 /rc/bin/service/tcp17019
+```
+
+5. **Start llmfs and load model:**
+```rc
+llmfs -s llm
+mount /srv/llm /mnt/llm
+echo 'load /path/to/model.bin /path/to/tokenizer.bin' > /mnt/llm/ctl
+```
+
+#### Client Setup (macOS/Linux)
+
+1. **Install drawterm:**
+```bash
+# macOS
+brew install drawterm
+
+# Linux (build from source)
+git clone https://github.com/9front/drawterm
+cd drawterm && make
+```
+
+2. **Connect to remote server:**
+```bash
+drawterm -h <server-ip>:17019 -a <server-ip>:17019 -u glenda
+```
+
+When prompted, enter the password you set in factotum.
+
+3. **Use llmfs from drawterm:**
+```rc
+# Mount llmfs (already running on server)
+mount /srv/llm /mnt/llm
+
+# Create session and generate text
+session=`{cat /mnt/llm/clone}
+echo 'Once upon a time' > /mnt/llm/$session/prompt
+echo generate > /mnt/llm/$session/ctl
+cat /mnt/llm/$session/output
+```
+
+#### Drawterm Tips
+
+- **Resize text:** Right-click on window, select "Resize" or use keyboard shortcuts
+- **Previous command:** Use up arrow or Ctrl-P
+- **Copy/paste:** Select text with mouse to copy, middle-click to paste
+- **Exit:** Type `exit` or close the window
+
+### Session Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `temp <float>` | Set temperature (0.0 = greedy) |
+| `topp <float>` | Set top-p sampling (0.0-1.0) |
+| `seed <int>` | Set random seed |
+| `steps <int>` | Set max tokens to generate |
+| `generate` | Start generation |
+| `reset` | Reset session state |
+| `close` | Close session |
+
+### Server Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `load <model> <tokenizer>` | Load model and tokenizer |
+| `unload` | Unload current model |
+
 ## Performance Optimizations
 
 ### SIMD Vectorization (SSE2)
