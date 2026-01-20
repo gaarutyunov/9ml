@@ -1,14 +1,14 @@
 # 9ml - Machine Learning Models for Plan 9
 
-A port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front). Run Llama 2 inference natively on Plan 9.
+A port of [llama2.c](https://github.com/karpathy/llama2.c) to Plan 9 (9front). Run LLaMA inference natively on Plan 9.
 
 ## Features
 
-- **FP32 inference** (`run.c`) - Full precision transformer inference
-- **INT8 quantized inference** (`runq.c`) - 4x smaller models with quantization
+- **Multi-format support** - Load safetensors (HuggingFace) and GGUF (llama.cpp) models
+- **Quantized inference** - Run Q4_0 and Q8_0 quantized GGUF models
 - **SIMD acceleration** - SSE2 assembly for 5.7x matmul speedup
 - **Multi-threading** - Parallel attention heads via Plan 9 libthread
-- **9P file server** (`llmfs`) - Distributed inference over the network
+- **9P file server** (`llmfs`) - Multi-model inference over the network with LRU eviction
 - **Pure Plan 9 C** - No external dependencies, uses only Plan 9 libc
 - **Pure C test suite** - No Python or shell scripts required
 - **Cross-platform** - Build and test on Linux, run natively on Plan 9
@@ -57,35 +57,50 @@ The test harness automatically:
 ### Download Model Weights
 
 ```bash
-# Small model (60MB) - good for testing
-wget https://huggingface.co/karpathy/tinyllamas/resolve/main/stories15M.bin
+# Install huggingface-cli
+pip install huggingface-hub
 
-# Tokenizer (required)
-wget https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin
+# Download safetensors model (60MB)
+huggingface-cli download Xenova/llama2.c-stories15M model.safetensors \
+    --local-dir models/
+
+# Download pre-quantized GGUF model (17MB, Q8_0)
+huggingface-cli download tensorblock/Xenova_llama2.c-stories15M-GGUF \
+    llama2.c-stories15M-Q8_0.gguf --local-dir models/
+
+# Download tokenizer
+wget -O tokenizer.bin \
+    https://github.com/karpathy/llama2.c/raw/master/tokenizer.bin
 ```
+
+## Model Formats
+
+9ml supports two model formats with automatic detection:
+
+| Format | Source | Quantization | Use Case |
+|--------|--------|--------------|----------|
+| Safetensors | HuggingFace | FP32/FP16 | Full precision inference |
+| GGUF | llama.cpp | Q4_0, Q8_0, etc. | Memory-efficient quantized inference |
+
+The loader automatically detects format from file magic:
+- **GGUF**: Magic `0x46554747` ("GGUF")
+- **Safetensors**: JSON header with tensor metadata
+
+For safetensors models, place a `config.json` in the same directory to provide model configuration (dim, n_heads, rope_theta, etc.).
 
 ## Running Inference
 
-### FP32 Inference
+### Safetensors Model
 
 In Plan 9:
 ```rc
-6c -w run.c && 6l -o run run.6
-./run stories15M.bin -z tokenizer.bin -n 50 -i 'Once upon a time'
+./run model.safetensors -z tokenizer.bin -n 50 -i 'Once upon a time'
 ```
 
-### INT8 Quantized Inference
+### GGUF Model (Quantized)
 
-First, quantize the model (on Linux):
-```bash
-make export
-./export quantize stories15M.bin stories15M_q80.bin
-```
-
-Then run in Plan 9:
 ```rc
-6c -w runq.c && 6l -o runq runq.6
-./runq stories15M_q80.bin -z tokenizer.bin -n 50
+./run model-Q8_0.gguf -z tokenizer.bin -n 50 -i 'Once upon a time'
 ```
 
 ### Command Line Options
@@ -99,25 +114,65 @@ Then run in Plan 9:
 | `-i <string>` | Input prompt |
 | `-z <string>` | Path to tokenizer |
 | `-m generate\|chat` | Mode (default: generate) |
+| `--no-simd` | Disable SIMD acceleration |
+| `-j <int>` | Number of threads |
 
-## Model Export Tool
+## LLM File Server (llmfs)
 
-```bash
-# Build the export tool
-make export
+A 9P file server for multi-model inference with LRU eviction.
 
-# Show model info
-./export info stories15M.bin
+### File System Structure
 
-# Quantize FP32 model to Q8_0
-./export quantize stories15M.bin stories15M_q80.bin
+```
+/mnt/llm/
+    ctl             # Server control: load, unload, limit
+    info            # Pool status: loaded models, memory usage
+    clone           # Create new session (returns ID)
+    0/              # Session directory
+        ctl         # Session control: model, temp, generate
+        info        # Session info and status
+        prompt      # Write prompt text
+        output      # Read generated output (blocks until done)
+        stream      # Streaming output
 ```
 
-## Performance Optimizations
+### Usage
+
+```rc
+# Start server and mount
+./llmfs -s llm
+mount /srv/llm /mnt/llm
+
+# Load a model
+echo 'load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
+
+# Create session and generate
+session=`{cat /mnt/llm/clone}
+echo 'model small' > /mnt/llm/$session/ctl
+echo 'Once upon a time' > /mnt/llm/$session/prompt
+echo 'generate' > /mnt/llm/$session/ctl
+cat /mnt/llm/$session/output
+```
+
+### Remote Inference
+
+On server:
+```rc
+./llmfs -s llm
+echo 'load small model.safetensors tokenizer.bin' > /srv/llm/ctl
+aux/listen1 -tv tcp!*!564 /bin/exportfs -r /srv/llm
+```
+
+On client:
+```rc
+srv tcp!server!564 llm
+mount /srv/llm /mnt/llm
+# Use as if local
+```
+
+## Performance
 
 ### SIMD Vectorization (SSE2)
-
-The inference engine uses hand-written SSE2 assembly for critical operations:
 
 | Operation | Implementation | Speedup |
 |-----------|---------------|---------|
@@ -127,22 +182,9 @@ The inference engine uses hand-written SSE2 assembly for critical operations:
 | vec_add, vec_scale | SSE2 assembly | ~4x |
 | softmax | C with unrolling | ~2x |
 
-The SIMD implementation uses:
-- 8-element unrolled loops with 2 accumulators
-- 4-element cleanup loop for remainders
-- Scalar fallback for non-aligned tails
-- Horizontal sum via SHUFPS for reductions
-
-### Thread Pool
-
-Parallel execution uses Plan 9's libthread:
-- Auto-detects CPU count from `/dev/sysstat`
-- Channel-based work distribution
-- Parallel attention head computation
-
 ### Benchmark Results
 
-Tested on stories15M model with 1024x1024 matmul:
+Tested on stories15M model:
 
 | Mode | GFLOPS | Speedup |
 |------|--------|---------|
@@ -150,90 +192,83 @@ Tested on stories15M model with 1024x1024 matmul:
 | SIMD (1 thread) | 19.0 | 5.7x |
 | SIMD (4 threads) | 18.7 | 5.6x |
 
-Token generation throughput: ~180-200 tok/s on stories15M.
-
-Note: Multi-threading overhead can exceed benefit for small matrices.
-
-### Runtime Configuration
-
-Command-line flags:
-```rc
-./run model.bin -z tok.bin --no-simd     # Disable SIMD
-./run model.bin -z tok.bin --threads 2   # Set thread count
-./run model.bin -z tok.bin -j 4          # Short form for threads
-```
+Token generation: ~180-240 tok/s on stories15M.
 
 ## Project Structure
 
 ```
 9ml/
 ├── src/
-│   ├── run.c              # FP32 inference
-│   ├── runq.c             # INT8 quantized inference
-│   ├── model.c            # Model loading helpers
-│   ├── modelq.c           # Quantized model helpers
-│   ├── export.c           # Model export/conversion tool
-│   ├── llmfs.c            # 9P file server for remote inference
-│   ├── simd.h             # SIMD function declarations
-│   ├── simd_amd64.s       # SSE2 assembly (matmul, rmsnorm, etc.)
-│   ├── parallel.h         # Thread pool declarations
-│   ├── parallel.c         # Thread pool implementation
-│   ├── mkfile             # Plan 9 build file
+│   ├── run.c              # Main inference driver
+│   ├── model.c            # Model loading (format detection)
+│   ├── llmfs.c            # 9P file server
+│   ├── simd_amd64.s       # SSE2 assembly
+│   ├── parallel.c         # Thread pool
+│   ├── arch/              # Architecture plugins
+│   │   ├── arch.c         # Plugin registry
+│   │   └── llama2.c       # LLaMA 2 architecture
+│   ├── format/            # File format parsers
+│   │   ├── gguf.c         # GGUF parser + dequantization
+│   │   └── safetensors.c  # Safetensors parser + config.json
+│   ├── pool/              # Model pool management
+│   │   └── pool.c         # LRU eviction, reference counting
 │   └── tests/             # Plan 9 test source files
 ├── test/                  # C test harness (Linux host)
 │   ├── harness.c          # Main test driver
-│   ├── reference.c/h      # Reference implementations
-│   ├── qemu.c/h           # QEMU VM management
-│   └── fat.c/h            # FAT disk operations
-├── qemu/
-│   ├── 9front.qcow2       # VM disk image (auto-downloaded)
-│   └── shared.img         # FAT disk for file sharing
+│   ├── reference.c        # Reference implementations
+│   └── qemu.c             # QEMU VM management
+├── models/                # Model files (download separately)
 ├── Makefile               # Linux build file
-├── mkfile                 # Root Plan 9 build file
+├── mkfile                 # Plan 9 build file
 └── CLAUDE.md              # Development documentation
 ```
 
-## Building in Plan 9
+## Building
 
-Clone the repo and build natively:
-```rc
-mk            # Build all: run, runq, export, tests
-mk clean      # Clean all build artifacts
-```
-
-## Plan 9 Notes
-
-### Compilation
-
-9front uses amd64 architecture:
-- Compiler: `6c` (NOT `8c` which is for 386)
-- Linker: `6l` (NOT `8l`)
-- Object files: `.6` extension
+### Linux (Test Harness)
 
 ```bash
-# Compile
-6c -w program.c
-
-# Link
-6l -o program program.6
+make test      # Build and run all tests in Plan 9 VM
+make clean     # Clean build artifacts
 ```
 
-### Key Differences from POSIX
+### Plan 9 Native
 
-| POSIX | Plan 9 |
-|-------|--------|
-| `printf(...)` | `print(...)` |
-| `fprintf(stderr, ...)` | `fprint(2, ...)` |
-| `exit(0)` | `exits(0)` |
-| `exit(1)` | `exits("error")` |
-| `NULL` | `nil` |
-| `mmap()` | `malloc()` + `read()` |
+```rc
+mk            # Build all targets
+mk clean      # Clean build artifacts
+```
+
+### Manual Compilation (Plan 9)
+
+```rc
+# Compile
+6c -w run.c
+
+# Link with libraries
+6l -o run run.6 simd_amd64.6 arch/arch.a6 format/format.a6
+```
+
+## Test Coverage
+
+| Test | Description |
+|------|-------------|
+| rmsnorm, softmax, matmul | Core math operations |
+| simd_validation | SIMD vs scalar correctness |
+| generation | End-to-end text generation |
+| format_generation | Safetensors vs GGUF output match |
+| config_json | HuggingFace config.json parsing |
+| gguf_dequant | Q4_0/Q8_0 dequantization |
+| pool_lru | Model pool LRU eviction |
+| llmfs_local | 9P server local mount |
+| llmfs_remote | Dual-VM remote inference |
 
 ## Resources
 
 - [9front](https://9front.org) - Plan 9 fork
 - [Plan 9 C Programming](http://doc.cat-v.org/plan_9/programming/c_programming_in_plan_9)
 - [llama2.c](https://github.com/karpathy/llama2.c) - Original implementation
+- [GGUF Format](https://github.com/ggerganov/ggml/blob/master/docs/gguf.md) - GGUF specification
 
 ## License
 
