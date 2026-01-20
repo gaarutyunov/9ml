@@ -6,6 +6,8 @@
  * 2. Extended format detection
  * 3. Architecture info extraction
  * 4. RoPE theta extraction
+ *
+ * Only ARCH_LLAMA2 is supported.
  */
 
 #include <u.h>
@@ -18,8 +20,6 @@
 
 #define ARCH_UNKNOWN  0
 #define ARCH_LLAMA2   1
-#define ARCH_LLAMA3   2
-#define ARCH_MISTRAL  3
 
 /* Simplified config for testing */
 typedef struct {
@@ -81,14 +81,9 @@ int detect_format(uchar *data, vlong size, Config *cfg, int *is_extended) {
 
         if (cfg->vocab_size < 0) cfg->vocab_size = -cfg->vocab_size;
 
-        /* Auto-detect architecture */
-        if (cfg->vocab_size >= 100000) {
-            cfg->rope_theta = 500000.0f;
-            cfg->arch_id = ARCH_LLAMA3;
-        } else {
-            cfg->rope_theta = 10000.0f;
-            cfg->arch_id = ARCH_LLAMA2;
-        }
+        /* Default to LLaMA 2 */
+        cfg->rope_theta = 10000.0f;
+        cfg->arch_id = ARCH_LLAMA2;
 
         *is_extended = 0;
         return 1;
@@ -166,13 +161,13 @@ main(int argc, char *argv[])
         failed++;
     }
 
-    /* Test 2: Legacy LLaMA 3 format (auto-detect from vocab) */
-    print("\nTest 2: Legacy LLaMA 3 format (vocab>=100K)\n");
+    /* Test 2: Legacy format with large vocab still uses LLaMA 2 */
+    print("\nTest 2: Legacy format defaults to LLaMA 2\n");
     create_legacy_header(buf, 512, 128256);
 
     if (detect_format(buf, 64, &cfg, &is_extended)) {
-        if (!is_extended && cfg.arch_id == ARCH_LLAMA3 &&
-            cfg.rope_theta == 500000.0f) {
+        if (!is_extended && cfg.arch_id == ARCH_LLAMA2 &&
+            cfg.rope_theta == 10000.0f) {
             print("  Result: PASS\n");
             passed++;
         } else {
@@ -204,46 +199,8 @@ main(int argc, char *argv[])
         failed++;
     }
 
-    /* Test 4: Extended LLaMA 3 format */
-    print("\nTest 4: Extended LLaMA 3 format\n");
-    create_extended_header(buf, 512, 128256, ARCH_LLAMA3, 500000.0f);
-
-    if (detect_format(buf, 128, &cfg, &is_extended)) {
-        if (is_extended && cfg.arch_id == ARCH_LLAMA3 &&
-            cfg.rope_theta == 500000.0f) {
-            print("  Result: PASS\n");
-            passed++;
-        } else {
-            print("  Result: FAIL (wrong values: arch=%d theta=%f)\n",
-                  cfg.arch_id, cfg.rope_theta);
-            failed++;
-        }
-    } else {
-        print("  Result: FAIL (detection failed)\n");
-        failed++;
-    }
-
-    /* Test 5: Extended Mistral format */
-    print("\nTest 5: Extended Mistral format\n");
-    create_extended_header(buf, 4096, 32000, ARCH_MISTRAL, 10000.0f);
-
-    if (detect_format(buf, 128, &cfg, &is_extended)) {
-        if (is_extended && cfg.arch_id == ARCH_MISTRAL &&
-            cfg.rope_theta == 10000.0f) {
-            print("  Result: PASS\n");
-            passed++;
-        } else {
-            print("  Result: FAIL (wrong values: arch=%d theta=%f)\n",
-                  cfg.arch_id, cfg.rope_theta);
-            failed++;
-        }
-    } else {
-        print("  Result: FAIL (detection failed)\n");
-        failed++;
-    }
-
-    /* Test 6: Custom rope_theta in extended format */
-    print("\nTest 6: Custom rope_theta (250000.0)\n");
+    /* Test 4: Custom rope_theta in extended format */
+    print("\nTest 4: Custom rope_theta (250000.0)\n");
     create_extended_header(buf, 512, 50000, ARCH_LLAMA2, 250000.0f);
 
     if (detect_format(buf, 128, &cfg, &is_extended)) {

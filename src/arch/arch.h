@@ -1,9 +1,8 @@
 /*
  * arch/arch.h - Model architecture plugin interface for 9ml
  *
- * This module defines the interface for model architecture plugins,
- * enabling support for different transformer architectures (LLaMA 2/3,
- * Mistral, Phi, etc.) through a common API.
+ * This module defines the interface for model architecture plugins.
+ * Currently only LLaMA 2 architecture is supported.
  *
  * NOTE: Types are designed to match model.c's existing types for compatibility.
  * model.c includes this header and uses these types via typedefs.
@@ -29,9 +28,6 @@ enum {
 enum {
     ARCH_UNKNOWN = 0,
     ARCH_LLAMA2  = 1,
-    ARCH_LLAMA3  = 2,
-    ARCH_MISTRAL = 3,
-    ARCH_PHI     = 4,
 };
 
 typedef struct {
@@ -126,8 +122,8 @@ typedef Transformer ModelInstance;
  * ---------------------------------------------------------------------------- */
 
 struct ModelArch {
-    char *name;                /* "llama2", "llama3", "mistral", etc. */
-    int arch_id;               /* ARCH_LLAMA2, ARCH_LLAMA3, etc. */
+    char *name;                /* "llama2" */
+    int arch_id;               /* ARCH_LLAMA2 */
 
     /* Forward pass - returns logits */
     float *(*forward)(Transformer *t, int token, int pos);
@@ -138,9 +134,6 @@ struct ModelArch {
 
     /* Estimate memory usage in bytes */
     uvlong (*estimate_memory)(ModelConfig *cfg, int quant_type);
-
-    /* Detect if this architecture matches the model file */
-    int (*detect)(void *data, vlong size, ModelConfig *cfg);
 };
 
 /* ----------------------------------------------------------------------------
@@ -158,9 +151,6 @@ ModelArch *arch_find(char *name);
 
 /* Find architecture by ID */
 ModelArch *arch_find_by_id(int arch_id);
-
-/* Auto-detect architecture from model data */
-ModelArch *arch_detect(void *data, vlong size, ModelConfig *cfg);
 
 /* List registered architectures */
 int arch_list(ModelArch **out, int max);

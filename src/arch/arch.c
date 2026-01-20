@@ -60,22 +60,6 @@ arch_find_by_id(int arch_id)
     return nil;
 }
 
-/* Auto-detect architecture from model data */
-ModelArch *
-arch_detect(void *data, vlong size, ModelConfig *cfg)
-{
-    int i;
-    for (i = 0; i < num_archs; i++) {
-        if (registered_archs[i]->detect != nil) {
-            if (registered_archs[i]->detect(data, size, cfg)) {
-                cfg->arch_id = registered_archs[i]->arch_id;
-                return registered_archs[i];
-            }
-        }
-    }
-    return nil;
-}
-
 /* List registered architectures */
 int
 arch_list(ModelArch **out, int max)
@@ -96,8 +80,6 @@ arch_list(ModelArch **out, int max)
 
 /* Forward declarations of registration functions */
 extern void llama2_register(void);
-extern void llama3_register(void);
-extern void mistral_register(void);
 
 static int arch_initialized = 0;
 
@@ -108,13 +90,8 @@ arch_init(void)
         return;
     }
 
-    /* Register built-in architectures in detection order:
-     * More specific detectors first (LLaMA 3 checks vocab size),
-     * then general ones (LLaMA 2 as default fallback).
-     */
-    llama3_register();   /* Check for large vocab first */
-    mistral_register();  /* Check for sliding window metadata */
-    llama2_register();   /* Default fallback for llama2.c format */
+    /* Register llama2 - the only supported architecture */
+    llama2_register();
 
     arch_initialized = 1;
 }
@@ -123,13 +100,8 @@ arch_init(void)
  * Standard RoPE Implementation
  *
  * RoPE (Rotary Position Embedding) rotates query and key vectors using
- * complex-valued rotation based on position. This is the standard
- * implementation used by LLaMA 2, LLaMA 3, and Mistral.
- *
- * The key difference between architectures is rope_theta:
- *   - LLaMA 2: 10000
- *   - LLaMA 3: 500000
- *   - Mistral: 10000 (but with sliding window)
+ * complex-valued rotation based on position. The rope_theta parameter
+ * controls the frequency base (default: 10000 for LLaMA 2).
  * ---------------------------------------------------------------------------- */
 
 void

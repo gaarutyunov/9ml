@@ -73,9 +73,7 @@ mk clean      # Clean all build artifacts
 │   ├── arch/              # Model architecture plugins
 │   │   ├── arch.h         # Architecture interface
 │   │   ├── arch.c         # Plugin registry
-│   │   ├── llama2.c       # LLaMA 2 (rope_theta=10000)
-│   │   ├── llama3.c       # LLaMA 3 (rope_theta=500000)
-│   │   └── mistral.c      # Mistral (sliding window)
+│   │   └── llama2.c       # LLaMA 2 architecture
 │   ├── format/            # File format parsers
 │   │   ├── gguf.c         # GGUF format parser
 │   │   └── safetensors.c  # Safetensors parser
@@ -140,8 +138,7 @@ make test
 | simd_debug | Minimal SIMD debug test |
 | softmax_simd | Softmax SIMD optimization tests |
 | rmsnorm_simd | RMSNorm SIMD optimization tests |
-| arch_detect | Architecture auto-detection from model file |
-| arch_llama3 | LLaMA 3 architecture (rope_theta=500000) |
+| arch_detect | Architecture registry and constants |
 | format_detect | File format detection (GGUF, safetensors) |
 | softmax_benchmark | Softmax performance benchmark |
 | softmax_accuracy | Softmax numerical accuracy tests |
@@ -315,6 +312,20 @@ Build on Plan 9:
 The model loader automatically detects format based on file magic:
 1. **GGUF**: Magic `0x46554747` ("GGUF" in little-endian)
 2. **Safetensors**: 8-byte header size followed by JSON metadata
+
+### config.json Support
+
+For safetensors models, the loader can read a `config.json` file in the same directory to get model configuration. Supported fields:
+- `model_type`: Maps to architecture ("llama" → ARCH_LLAMA2)
+- `rope_theta`: RoPE frequency base (default: 10000.0)
+- `num_hidden_layers`: Number of transformer layers
+- `num_attention_heads`: Number of attention heads
+- `num_key_value_heads`: Number of KV heads (for GQA)
+- `hidden_size`: Embedding dimension
+- `intermediate_size`: FFN hidden dimension
+- `max_position_embeddings`: Maximum sequence length
+
+If `config.json` is not present, values are inferred from tensor shapes.
 
 ### Format Comparison
 

@@ -764,15 +764,9 @@ gguf_get_model_config(GGUFFile *gf, GGUFModelConfig *cfg)
     snprint(key, sizeof(key), "%s.rope.freq_base", cfg->arch_name);
     cfg->rope_theta = gguf_get_float(gf, key, 10000.0f);
 
-    /* Determine architecture ID */
+    /* Determine architecture ID - only llama is supported */
     if (strcmp(cfg->arch_name, "llama") == 0) {
-        if (cfg->rope_theta > 100000.0f) {
-            cfg->arch_id = 2;  /* ARCH_LLAMA3 */
-        } else {
-            cfg->arch_id = 1;  /* ARCH_LLAMA2 */
-        }
-    } else if (strcmp(cfg->arch_name, "mistral") == 0) {
-        cfg->arch_id = 3;  /* ARCH_MISTRAL */
+        cfg->arch_id = 1;  /* ARCH_LLAMA2 */
     } else {
         cfg->arch_id = 0;  /* ARCH_UNKNOWN */
     }

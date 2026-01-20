@@ -37,7 +37,7 @@ threadmain(int argc, char *argv[])
 
     /* Test 2: Load first model */
     print("\nTest 2: Load model\n");
-    e1 = pool_load(&pool, "stories15M", "stories15M.bin", "tokenizer.bin");
+    e1 = pool_load(&pool, "stories15M", "stories15M.safetensors", "tokenizer.bin");
     if (e1 != nil && pool.count == 1 && e1->refcount == 1) {
         print("  Loaded: %s (memory: %lludMB)\n", e1->name, e1->memory / (1024 * 1024));
         print("  Result: PASS\n");
@@ -72,7 +72,7 @@ threadmain(int argc, char *argv[])
     /* Test 5: Load same model again (should return existing, no new load) */
     print("\nTest 5: Load same model again\n");
     uvlong old_memory = pool.total_memory;
-    e2 = pool_load(&pool, "stories15M", "stories15M.bin", "tokenizer.bin");
+    e2 = pool_load(&pool, "stories15M", "stories15M.safetensors", "tokenizer.bin");
     if (e2 == e1 && pool.total_memory == old_memory && e1->refcount == 2) {
         print("  Result: PASS (no new load, refcount=2)\n");
         passed++;

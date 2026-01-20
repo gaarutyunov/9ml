@@ -112,7 +112,6 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_rmsnorm_simd.c",
         TESTS_DIR "/test_simd_debug2.c",
         TESTS_DIR "/test_arch_detect.c",
-        TESTS_DIR "/test_arch_llama3.c",
         TESTS_DIR "/test_format_detect.c",
         TESTS_DIR "/test_softmax_benchmark.c",
         TESTS_DIR "/test_softmax_accuracy.c",
@@ -121,6 +120,7 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_safetensors.c",
         TESTS_DIR "/test_pool_lru.c",
         TESTS_DIR "/test_format_generation.c",
+        TESTS_DIR "/test_config_json.c",
         NULL
     };
 
@@ -140,8 +140,6 @@ static int prepare_shared_disk(void) {
         SRC_DIR "/arch/arch.h",
         SRC_DIR "/arch/arch.c",
         SRC_DIR "/arch/llama2.c",
-        SRC_DIR "/arch/llama3.c",
-        SRC_DIR "/arch/mistral.c",
         NULL
     };
     for (int i = 0; arch_files[i]; i++) {
@@ -287,22 +285,45 @@ static int run_vm_tests(void) {
 
     /* Compile arch plugin library (needed by run.c which includes model.c) */
     /* Use subshell @{} to avoid changing current directory */
-    run_vm_cmd("@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c } >[2=1] > archcmp.log; echo arch_compile_done", 60);
-    run_vm_cmd("@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 } >[2=1] >> archcmp.log; echo arch_lib_done", 30);
+    run_vm_cmd("@{ cd arch; 6c -w arch.c llama2.c } >[2=1] > archcmp.log; echo arch_compile_done", 60);
+    run_vm_cmd("@{ cd arch; ar vu arch.a6 arch.6 llama2.6 } >[2=1] >> archcmp.log; echo arch_lib_done", 30);
 
     /* Compile format library (needed by model.c for GGUF/safetensors loading) */
     run_vm_cmd("@{ cd format; 6c -w gguf.c safetensors.c } >[2=1] > formatcmp.log; echo format_compile_done", 60);
     run_vm_cmd("@{ cd format; ar vu format.a6 gguf.6 safetensors.6 } >[2=1] >> formatcmp.log; echo format_lib_done", 30);
+    /* List format library contents to verify symbols */
+    run_vm_cmd("nm format/format.a6 > format_symbols.log >[2=1]; echo nm_done", 30);
 
     /* Compile and run each test (basic tests define DISABLE_THREADING in their source) */
-    /* Tests that include model.c need arch/arch.a6 for arch plugin symbols */
-    run_vm_cmd("6c -w test_rmsnorm.c && 6l -o t_rmsnorm test_rmsnorm.6 arch/arch.a6 && ./t_rmsnorm > rmsnorm.out", 15);
-    run_vm_cmd("6c -w test_softmax.c && 6l -o t_softmax test_softmax.6 arch/arch.a6 && ./t_softmax > softmax.out", 15);
-    run_vm_cmd("6c -w test_matmul.c && 6l -o t_matmul test_matmul.6 arch/arch.a6 && ./t_matmul > matmul.out", 15);
-    run_vm_cmd("6c -w test_rng.c && 6l -o t_rng test_rng.6 arch/arch.a6 && ./t_rng > rng.out", 15);
-    run_vm_cmd("6c -w test_quantize.c && 6l -o t_quantize test_quantize.6 && ./t_quantize > quantize.out", 15);
-    run_vm_cmd("6c -w test_quantized_matmul.c && 6l -o t_qmatmul test_quantized_matmul.6 && ./t_qmatmul > quantized_matmul.out", 15);
-    run_vm_cmd("6c -w test_model_loading.c && 6l -o t_model test_model_loading.6 arch/arch.a6 && ./t_model > model_loading.out", 15);
+    /* Tests that include model.c need arch/arch.a6 for arch plugins, format/format.a6 for loaders */
+    /* Capture stderr to help diagnose compilation failures */
+    run_vm_cmd("6c -w -Iformat test_rmsnorm.c >[2=1] > rmsnorm_compile.log; echo rmsnorm_compiled", 30);
+    run_vm_cmd("6l -o t_rmsnorm test_rmsnorm.6 arch/arch.a6 format/format.a6 >[2=1] >> rmsnorm_compile.log; echo rmsnorm_linked", 30);
+    run_vm_cmd("./t_rmsnorm > rmsnorm.out >[2=1]", 15);
+
+    run_vm_cmd("6c -w -Iformat test_softmax.c >[2=1] > softmax_compile.log; echo softmax_compiled", 30);
+    run_vm_cmd("6l -o t_softmax test_softmax.6 arch/arch.a6 format/format.a6 >[2=1] >> softmax_compile.log; echo softmax_linked", 30);
+    run_vm_cmd("./t_softmax > softmax.out >[2=1]", 15);
+
+    run_vm_cmd("6c -w -Iformat test_matmul.c >[2=1] > matmul_compile.log; echo matmul_compiled", 30);
+    run_vm_cmd("6l -o t_matmul test_matmul.6 arch/arch.a6 format/format.a6 >[2=1] >> matmul_compile.log; echo matmul_linked", 30);
+    run_vm_cmd("./t_matmul > matmul.out >[2=1]", 15);
+
+    run_vm_cmd("6c -w -Iformat test_rng.c >[2=1] > rng_compile.log; echo rng_compiled", 30);
+    run_vm_cmd("6l -o t_rng test_rng.6 arch/arch.a6 format/format.a6 >[2=1] >> rng_compile.log; echo rng_linked", 30);
+    run_vm_cmd("./t_rng > rng.out >[2=1]", 15);
+
+    run_vm_cmd("6c -w test_quantize.c >[2=1] > quantize_compile.log; echo quantize_compiled", 30);
+    run_vm_cmd("6l -o t_quantize test_quantize.6 >[2=1] >> quantize_compile.log; echo quantize_linked", 30);
+    run_vm_cmd("./t_quantize > quantize.out >[2=1]", 15);
+
+    run_vm_cmd("6c -w test_quantized_matmul.c >[2=1] > qmatmul_compile.log; echo qmatmul_compiled", 30);
+    run_vm_cmd("6l -o t_qmatmul test_quantized_matmul.6 >[2=1] >> qmatmul_compile.log; echo qmatmul_linked", 30);
+    run_vm_cmd("./t_qmatmul > quantized_matmul.out >[2=1]", 15);
+
+    run_vm_cmd("6c -w -Iformat test_model_loading.c >[2=1] > model_compile.log; echo model_compiled", 30);
+    run_vm_cmd("6l -o t_model test_model_loading.6 arch/arch.a6 format/format.a6 >[2=1] >> model_compile.log; echo model_linked", 30);
+    run_vm_cmd("./t_model > model_loading.out >[2=1]", 15);
 
     /* Generation test (needs model files) */
     /* Note: Plan 9 rc shell uses >[2] for stderr, not 2> */
@@ -317,58 +338,58 @@ static int run_vm_tests(void) {
     /* Quantized generation test (GGUF Q8_0 model via run.c) */
     run_vm_cmd("./run stories15M-Q8_0.gguf -z tokenizer.bin -n 20 -s 42 -t 0.0 --no-simd -j 1 > generation_q.out >[2=1]", 120);
 
-    /* Simple threading test first (no SIMD linked) - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_thread_simple.c", 30);
-    run_vm_cmd("6l -o t_thread test_thread_simple.6 arch/arch.a6", 30);
+    /* Simple threading test first (no SIMD linked) - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_thread_simple.c", 30);
+    run_vm_cmd("6l -o t_thread test_thread_simple.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_thread > thread_simple.out >[2=1]", 60);
 
-    /* Thread test with SIMD linked (SIMD not called) - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_thread_with_simd.c", 30);
-    run_vm_cmd("6l -o t_thread_simd test_thread_with_simd.6 simd_amd64.6 arch/arch.a6", 30);
+    /* Thread test with SIMD linked (SIMD not called) - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_thread_with_simd.c", 30);
+    run_vm_cmd("6l -o t_thread_simd test_thread_with_simd.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_thread_simd > thread_simd.out >[2=1]", 60);
 
-    /* Thread test with struct (like model.c) - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_thread_struct.c", 30);
-    run_vm_cmd("6l -o t_thread_struct test_thread_struct.6 arch/arch.a6", 30);
+    /* Thread test with struct (like model.c) - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_thread_struct.c", 30);
+    run_vm_cmd("6l -o t_thread_struct test_thread_struct.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_thread_struct > thread_struct.out >[2=1]", 60);
 
-    /* Thread test with struct + SIMD linked - includes model.c, needs arch */
-    run_vm_cmd("6l -o t_thread_struct_simd test_thread_struct.6 simd_amd64.6 arch/arch.a6", 30);
+    /* Thread test with struct + SIMD linked - includes model.c, needs arch and format */
+    run_vm_cmd("6l -o t_thread_struct_simd test_thread_struct.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_thread_struct_simd > thread_struct_simd.out >[2=1]", 60);
 
-    /* Test pool_create from model.c - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_model_pool.c", 60);
-    run_vm_cmd("6l -o t_model_pool test_model_pool.6 simd_amd64.6 arch/arch.a6", 30);
+    /* Test pool_create from model.c - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_model_pool.c", 60);
+    run_vm_cmd("6l -o t_model_pool test_model_pool.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_model_pool > model_pool.out >[2=1]", 60);
 
-    /* Benchmark test - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_benchmark.c", 60);
-    run_vm_cmd("6l -o t_benchmark test_benchmark.6 simd_amd64.6 arch/arch.a6", 30);
+    /* Benchmark test - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_benchmark.c", 60);
+    run_vm_cmd("6l -o t_benchmark test_benchmark.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_benchmark > benchmark.out >[2=1]", 300);
 
-    /* SIMD validation test - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_simd_validation.c", 60);
-    run_vm_cmd("6l -o t_simd_validation test_simd_validation.6 simd_amd64.6 arch/arch.a6", 30);
+    /* SIMD validation test - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_simd_validation.c", 60);
+    run_vm_cmd("6l -o t_simd_validation test_simd_validation.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_simd_validation > simd_validation.out >[2=1]", 300);
 
-    /* SIMD debug test (minimal) - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_simd_debug.c", 60);
-    run_vm_cmd("6l -o t_simd_debug test_simd_debug.6 simd_amd64.6 arch/arch.a6", 30);
+    /* SIMD debug test (minimal) - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_simd_debug.c", 60);
+    run_vm_cmd("6l -o t_simd_debug test_simd_debug.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_simd_debug > simd_debug.out >[2=1]", 60);
 
-    /* Softmax SIMD validation test - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_softmax_simd.c", 60);
-    run_vm_cmd("6l -o t_softmax_simd test_softmax_simd.6 simd_amd64.6 arch/arch.a6", 30);
+    /* Softmax SIMD validation test - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_softmax_simd.c", 60);
+    run_vm_cmd("6l -o t_softmax_simd test_softmax_simd.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_softmax_simd > softmax_simd.out >[2=1]", 120);
 
-    /* RMSNorm SIMD validation test - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_rmsnorm_simd.c", 60);
-    run_vm_cmd("6l -o t_rmsnorm_simd test_rmsnorm_simd.6 simd_amd64.6 arch/arch.a6", 30);
+    /* RMSNorm SIMD validation test - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_rmsnorm_simd.c", 60);
+    run_vm_cmd("6l -o t_rmsnorm_simd test_rmsnorm_simd.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_rmsnorm_simd > rmsnorm_simd.out >[2=1]", 120);
 
-    /* SIMD debug test 2 - minimal test to isolate denormal issue - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_simd_debug2.c", 60);
-    run_vm_cmd("6l -o t_simd_debug2 test_simd_debug2.6 simd_amd64.6 arch/arch.a6", 30);
+    /* SIMD debug test 2 - minimal test to isolate denormal issue - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_simd_debug2.c", 60);
+    run_vm_cmd("6l -o t_simd_debug2 test_simd_debug2.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_simd_debug2 > simd_debug2.out >[2=1]", 60);
 
     /* Architecture detection test */
@@ -376,24 +397,24 @@ static int run_vm_tests(void) {
     run_vm_cmd("6l -o t_arch_detect test_arch_detect.6", 30);
     run_vm_cmd("./t_arch_detect > arch_detect.out >[2=1]", 60);
 
-    /* LLaMA 3 architecture test */
-    run_vm_cmd("6c -w test_arch_llama3.c", 60);
-    run_vm_cmd("6l -o t_arch_llama3 test_arch_llama3.6", 30);
-    run_vm_cmd("./t_arch_llama3 > arch_llama3.out >[2=1]", 60);
-
     /* Format detection test */
     run_vm_cmd("6c -w test_format_detect.c", 60);
     run_vm_cmd("6l -o t_format_detect test_format_detect.6", 30);
     run_vm_cmd("./t_format_detect > format_detect.out >[2=1]", 60);
 
-    /* Softmax benchmark test - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_softmax_benchmark.c", 60);
-    run_vm_cmd("6l -o t_softmax_bench test_softmax_benchmark.6 simd_amd64.6 arch/arch.a6", 30);
+    /* config.json parsing test */
+    run_vm_cmd("6c -w test_config_json.c", 60);
+    run_vm_cmd("6l -o t_config_json test_config_json.6", 30);
+    run_vm_cmd("./t_config_json > config_json.out >[2=1]", 60);
+
+    /* Softmax benchmark test - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_softmax_benchmark.c", 60);
+    run_vm_cmd("6l -o t_softmax_bench test_softmax_benchmark.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_softmax_bench > softmax_benchmark.out >[2=1]", 300);
 
-    /* Softmax accuracy test - includes model.c, needs arch */
-    run_vm_cmd("6c -w test_softmax_accuracy.c", 60);
-    run_vm_cmd("6l -o t_softmax_acc test_softmax_accuracy.6 simd_amd64.6 arch/arch.a6", 30);
+    /* Softmax accuracy test - includes model.c, needs arch and format */
+    run_vm_cmd("6c -w -Iformat test_softmax_accuracy.c", 60);
+    run_vm_cmd("6l -o t_softmax_acc test_softmax_accuracy.6 simd_amd64.6 arch/arch.a6 format/format.a6", 30);
     run_vm_cmd("./t_softmax_acc > softmax_accuracy.out >[2=1]", 300);
 
     /* GGUF dequantization test (unit tests, no file needed) */
@@ -414,9 +435,9 @@ static int run_vm_tests(void) {
     run_vm_cmd("6l -o t_safetensors test_safetensors.6 >[2=1] >> safecmp.log; echo safe_linked", 30);
     run_vm_cmd("./t_safetensors > safetens.out >[2=1]", 60);
 
-    /* Pool LRU test - includes model.c and pool/pool.c, needs arch library and SIMD */
-    run_vm_cmd("6c -w -Ipool test_pool_lru.c >[2=1] > poolcmp.log; echo pool_compiled", 120);
-    run_vm_cmd("6l -o t_pool_lru test_pool_lru.6 simd_amd64.6 arch/arch.a6 >[2=1] >> poolcmp.log; echo pool_linked", 30);
+    /* Pool LRU test - includes model.c and pool/pool.c, needs arch, format libs and SIMD */
+    run_vm_cmd("6c -w -Ipool -Iformat test_pool_lru.c >[2=1] > poolcmp.log; echo pool_compiled", 120);
+    run_vm_cmd("6l -o t_pool_lru test_pool_lru.6 simd_amd64.6 arch/arch.a6 format/format.a6 >[2=1] >> poolcmp.log; echo pool_linked", 30);
     run_vm_cmd("./t_pool_lru > pool_lru.out >[2=1]", 120);
 
     /* Format generation comparison test - includes model.c, needs arch, format libs, and SIMD */
@@ -445,8 +466,16 @@ static void test_rmsnorm(void) {
     int size;
     char *data = fat_read_file(SHARED_IMAGE, "rmsnorm.out", &size);
     if (!data || size == 0) {
+        /* Try to read compile log for diagnostics */
+        int logsize;
+        char *log = fat_read_file(SHARED_IMAGE, "rmsnorm_compile.log", &logsize);
+        if (log && logsize > 0) {
+            printf("FAIL (no output)\n  Compile log: %.*s\n", logsize, log);
+            free(log);
+        } else {
+            printf("FAIL (no output)\n");
+        }
         add_result("rmsnorm", 0, 0, "no output file");
-        printf("FAIL (no output)\n");
         free(data);
         return;
     }
@@ -485,8 +514,16 @@ static void test_softmax(void) {
     int size;
     char *data = fat_read_file(SHARED_IMAGE, "softmax.out", &size);
     if (!data || size == 0) {
+        /* Try to read compile log for diagnostics */
+        int logsize;
+        char *log = fat_read_file(SHARED_IMAGE, "softmax_compile.log", &logsize);
+        if (log && logsize > 0) {
+            printf("FAIL (no output)\n  Compile log: %.*s\n", logsize, log);
+            free(log);
+        } else {
+            printf("FAIL (no output)\n");
+        }
         add_result("softmax", 0, 0, "no output file");
-        printf("FAIL (no output)\n");
         free(data);
         return;
     }
@@ -525,8 +562,16 @@ static void test_matmul(void) {
     int size;
     char *data = fat_read_file(SHARED_IMAGE, "matmul.out", &size);
     if (!data || size == 0) {
+        /* Try to read compile log for diagnostics */
+        int logsize;
+        char *log = fat_read_file(SHARED_IMAGE, "matmul_compile.log", &logsize);
+        if (log && logsize > 0) {
+            printf("FAIL (no output)\n  Compile log: %.*s\n", logsize, log);
+            free(log);
+        } else {
+            printf("FAIL (no output)\n");
+        }
         add_result("matmul", 0, 0, "no output file");
-        printf("FAIL (no output)\n");
         free(data);
         return;
     }
@@ -566,8 +611,16 @@ static void test_rng(void) {
     int size;
     char *data = fat_read_file(SHARED_IMAGE, "rng.out", &size);
     if (!data || size == 0) {
+        /* Try to read compile log for diagnostics */
+        int logsize;
+        char *log = fat_read_file(SHARED_IMAGE, "rng_compile.log", &logsize);
+        if (log && logsize > 0) {
+            printf("FAIL (no output)\n  Compile log: %.*s\n", logsize, log);
+            free(log);
+        } else {
+            printf("FAIL (no output)\n");
+        }
         add_result("rng", 0, 0, "no output file");
-        printf("FAIL (no output)\n");
         free(data);
         return;
     }
@@ -1232,47 +1285,6 @@ static void test_softmax_benchmark(void) {
     free(data);
 }
 
-/* Test: LLaMA 3 architecture */
-static void test_arch_llama3(void) {
-    printf("Testing arch_llama3... ");
-
-    int size;
-    char *data = fat_read_file(SHARED_IMAGE, "arch_llama3.out", &size);
-    if (!data || size == 0) {
-        add_result("arch_llama3", 0, 0, "no output file - likely crashed");
-        printf("FAIL (no output - likely crashed)\n");
-        free(data);
-        return;
-    }
-
-    /* Check for PASS/FAIL in output */
-    if (strstr(data, "PASS: All") != NULL && strstr(data, "LLaMA 3 tests passed") != NULL) {
-        add_result("arch_llama3", 1, 0, NULL);
-        printf("PASS\n");
-    } else if (strstr(data, "FAIL") != NULL) {
-        add_result("arch_llama3", 0, 0, "LLaMA 3 architecture test failed");
-        printf("FAIL (LLaMA 3 architecture test failed)\n");
-    } else {
-        add_result("arch_llama3", 0, 0, "unknown result");
-        printf("FAIL (unknown result)\n");
-    }
-
-    /* Print detailed output */
-    printf("  LLaMA 3 architecture output:\n");
-    char *data_copy = strdup(data);
-    char *line = strtok(data_copy, "\n");
-    while (line) {
-        if (strstr(line, "===") || strstr(line, "PASS") ||
-            strstr(line, "FAIL") || strstr(line, "Test") ||
-            strstr(line, "Result") || strstr(line, "theta")) {
-            printf("    %s\n", line);
-        }
-        line = strtok(NULL, "\n");
-    }
-    free(data_copy);
-    free(data);
-}
-
 /* Test: softmax accuracy */
 static void test_softmax_accuracy(void) {
     printf("Testing softmax_accuracy... ");
@@ -1341,6 +1353,46 @@ static void test_format_detect(void) {
 
     /* Print detailed output */
     printf("  Format detection output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: config.json parsing */
+static void test_config_json(void) {
+    printf("Testing config_json... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "config_json.out", &size);
+    if (!data || size == 0) {
+        add_result("config_json", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "config.json parsing tests passed") != NULL) {
+        add_result("config_json", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("config_json", 0, 0, "config.json parsing test failed");
+        printf("FAIL (config.json parsing test failed)\n");
+    } else {
+        add_result("config_json", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  config.json parsing output:\n");
     char *data_copy = strdup(data);
     char *line = strtok(data_copy, "\n");
     while (line) {
@@ -1650,11 +1702,37 @@ static void test_llmfs_local(void) {
         return;
     }
 
-    /* Check compile log for errors */
+    /* Check format library compile log */
     int size;
+    char *format_log = fat_read_file(SHARED_IMAGE, "formatcmp.log", &size);
+    if (format_log && size > 0) {
+        printf("\n  Format lib compile log: %s\n", format_log);
+    }
+    free(format_log);
+
+    /* Check format library symbols */
+    char *symbols = fat_read_file(SHARED_IMAGE, "format_symbols.log", &size);
+    if (symbols && size > 0) {
+        /* Just print first few lines */
+        char *first_lines = strdup(symbols);
+        if (first_lines) {
+            char *p = first_lines;
+            int lines = 0;
+            while (*p && lines < 20) {
+                if (*p == '\n') lines++;
+                p++;
+            }
+            *p = '\0';
+            printf("  Format lib symbols (first 20 lines): %s\n", first_lines);
+            free(first_lines);
+        }
+    }
+    free(symbols);
+
+    /* Check llmfs compile log for errors */
     char *compile_log = fat_read_file(SHARED_IMAGE, "llmfscmp.log", &size);
     if (compile_log && size > 0) {
-        printf("\n  Compile log: %s\n", compile_log);
+        printf("  Compile log: %s\n", compile_log);
     }
     free(compile_log);
 
@@ -1741,8 +1819,8 @@ static int run_dualvm_llmfs_remote(void) {
 
     /* CPU VM: Compile arch plugin library (use subshell to not change cwd) */
     printf("CPU: Compiling arch plugins...\n");
-    qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; 6c -w arch.c llama2.c llama3.c mistral.c }", 60);
-    qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; ar vu arch.a6 arch.6 llama2.6 llama3.6 mistral.6 }", 30);
+    qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; 6c -w arch.c llama2.c }", 60);
+    qemu_sendln_wait(&dualvm.cpu, "@{ cd arch; ar vu arch.a6 arch.6 llama2.6 }", 30);
 
     /* CPU VM: Compile format library */
     printf("CPU: Compiling format library...\n");
@@ -1991,8 +2069,8 @@ int main(int argc, char *argv[]) {
     if (should_run_test("softmax_simd")) test_softmax_simd();
     if (should_run_test("rmsnorm_simd")) test_rmsnorm_simd();
     if (should_run_test("arch_detect")) test_arch_detect();
-    if (should_run_test("arch_llama3")) test_arch_llama3();
     if (should_run_test("format_detect")) test_format_detect();
+    if (should_run_test("config_json")) test_config_json();
     if (should_run_test("softmax_benchmark")) test_softmax_benchmark();
     if (should_run_test("softmax_accuracy")) test_softmax_accuracy();
     if (should_run_test("gguf_dequant")) test_gguf_dequant();

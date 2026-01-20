@@ -287,46 +287,6 @@ llama2_forward(ModelInstance *m, int token, int pos)
 }
 
 /* ----------------------------------------------------------------------------
- * LLaMA 2 Architecture Detection
- *
- * Legacy llama2.c format:
- *   - 7 ints (28 bytes) header: dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len
- *   - Negative vocab_size indicates separate classifier weights
- *   - No magic number (first int is dim, typically 288-4096)
- * ---------------------------------------------------------------------------- */
-
-static int
-llama2_detect(void *data, vlong size, ModelConfig *cfg)
-{
-    int *header;
-    int dim, hidden_dim, n_layers, n_heads;
-
-    USED(size);
-
-    if (size < 28) {
-        return 0;  /* Too small to be a model */
-    }
-
-    header = (int *)data;
-    dim = header[0];
-    hidden_dim = header[1];
-    n_layers = header[2];
-    n_heads = header[3];
-
-    /* Sanity checks for llama2.c format */
-    if (dim < 64 || dim > 8192) return 0;
-    if (hidden_dim < 64 || hidden_dim > 32768) return 0;
-    if (n_layers < 1 || n_layers > 128) return 0;
-    if (n_heads < 1 || n_heads > 128) return 0;
-
-    /* Set LLaMA 2 defaults */
-    cfg->rope_theta = 10000.0f;
-    cfg->arch_id = ARCH_LLAMA2;
-
-    return 1;
-}
-
-/* ----------------------------------------------------------------------------
  * Memory Estimation
  * ---------------------------------------------------------------------------- */
 
@@ -373,7 +333,6 @@ static ModelArch llama2_arch = {
     .forward = llama2_forward,
     .apply_rope = rope_apply_standard,
     .estimate_memory = llama2_estimate_memory,
-    .detect = llama2_detect,
 };
 
 /* Registration function - call at startup */

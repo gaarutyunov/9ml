@@ -5,8 +5,6 @@ LIB=arch.a$O
 OFILES=\
 	arch.$O\
 	llama2.$O\
-	llama3.$O\
-	mistral.$O\
 
 HFILES=\
 	arch.h\

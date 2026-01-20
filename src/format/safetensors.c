@@ -574,6 +574,144 @@ st_tensor_list_free(STTensor *t)
 }
 
 /* ----------------------------------------------------------------------------
+ * config.json Parsing
+ *
+ * Attempts to load model configuration from config.json in the same directory
+ * as the safetensors file. This provides model_type and rope_theta values.
+ * ---------------------------------------------------------------------------- */
+
+/*
+ * Try to load config.json from same directory as model file.
+ * Extracts model_type, rope_theta, num_hidden_layers, num_attention_heads,
+ * num_key_value_heads, hidden_size, intermediate_size, and max_position_embeddings.
+ * Returns 0 on success, -1 if config.json not found or parse error.
+ */
+static int
+load_config_json(char *model_path, int *arch_id, float *rope_theta,
+                 int *n_layers, int *n_heads, int *n_kv_heads,
+                 int *dim, int *hidden_dim, int *seq_len)
+{
+    char config_path[256];
+    char *slash;
+    int fd, n;
+    char buf[8192];
+    char *p;
+
+    /* Build path to config.json in same directory */
+    strncpy(config_path, model_path, sizeof(config_path)-1);
+    config_path[sizeof(config_path)-1] = '\0';
+
+    slash = strrchr(config_path, '/');
+    if (slash)
+        strcpy(slash + 1, "config.json");
+    else
+        strcpy(config_path, "config.json");
+
+    fd = open(config_path, OREAD);
+    if (fd < 0)
+        return -1;
+
+    n = read(fd, buf, sizeof(buf)-1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    buf[n] = '\0';
+
+    /* Parse model_type - map to arch_id */
+    p = strstr(buf, "\"model_type\"");
+    if (p) {
+        p = strchr(p + 12, ':');
+        if (p) {
+            p = strchr(p, '"');
+            if (p) {
+                p++;
+                if (strncmp(p, "llama", 5) == 0)
+                    *arch_id = 1;  /* ARCH_LLAMA2 */
+            }
+        }
+    }
+
+    /* Parse rope_theta */
+    p = strstr(buf, "\"rope_theta\"");
+    if (p) {
+        p = strchr(p + 12, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *rope_theta = strtod(p, nil);
+        }
+    }
+
+    /* Parse num_hidden_layers */
+    p = strstr(buf, "\"num_hidden_layers\"");
+    if (p) {
+        p = strchr(p + 19, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *n_layers = strtol(p, nil, 10);
+        }
+    }
+
+    /* Parse num_attention_heads */
+    p = strstr(buf, "\"num_attention_heads\"");
+    if (p) {
+        p = strchr(p + 21, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *n_heads = strtol(p, nil, 10);
+        }
+    }
+
+    /* Parse num_key_value_heads */
+    p = strstr(buf, "\"num_key_value_heads\"");
+    if (p) {
+        p = strchr(p + 21, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *n_kv_heads = strtol(p, nil, 10);
+        }
+    }
+
+    /* Parse hidden_size (dim) */
+    p = strstr(buf, "\"hidden_size\"");
+    if (p) {
+        p = strchr(p + 13, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *dim = strtol(p, nil, 10);
+        }
+    }
+
+    /* Parse intermediate_size (hidden_dim) */
+    p = strstr(buf, "\"intermediate_size\"");
+    if (p) {
+        p = strchr(p + 19, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *hidden_dim = strtol(p, nil, 10);
+        }
+    }
+
+    /* Parse max_position_embeddings (seq_len) */
+    p = strstr(buf, "\"max_position_embeddings\"");
+    if (p) {
+        p = strchr(p + 25, ':');
+        if (p) {
+            while (*p && (*p == ':' || *p == ' ' || *p == '\t'))
+                p++;
+            *seq_len = strtol(p, nil, 10);
+        }
+    }
+
+    return 0;
+}
+
+/* ----------------------------------------------------------------------------
  * Safetensors to Transformer Loading
  * ---------------------------------------------------------------------------- */
 
@@ -644,11 +782,24 @@ st_load_transformer(char *path, void *transformer)
     int l;
     char name[128];
 
+    /* Initialize config with defaults */
+    int vocab_size = 0, dim = 0, hidden_dim = 0, n_layers = 0;
+    int n_heads = 0, n_kv_heads = 0, seq_len = 256;
+    float rope_theta = 10000.0f;
+    int arch_id = 1;  /* ARCH_LLAMA2 */
+
+    /* Try loading config.json first for model parameters */
+    if (load_config_json(path, &arch_id, &rope_theta,
+                         &n_layers, &n_heads, &n_kv_heads,
+                         &dim, &hidden_dim, &seq_len) == 0) {
+        /* Config loaded - values that remain 0 will be inferred from tensors */
+    }
+
     if (st_open(&sf, path) < 0) {
         return -1;
     }
 
-    /* Extract model configuration from tensor shapes */
+    /* Extract model configuration from tensor shapes for missing values */
     /* lm_head.weight shape is [vocab_size, dim] */
     emb_tensor = st_find_tensor(&sf, "lm_head.weight");
     if (emb_tensor == nil) {
@@ -663,16 +814,21 @@ st_load_transformer(char *path, void *transformer)
         return -1;
     }
 
-    int vocab_size = (int)emb_tensor->dims[0];
-    int dim = (int)emb_tensor->dims[1];
+    /* Always get vocab_size from tensor (not in config.json) */
+    vocab_size = (int)emb_tensor->dims[0];
 
-    /* Count layers by looking for model.layers.N.input_layernorm.weight */
-    int n_layers = 0;
-    for (l = 0; l < 256; l++) {
-        snprint(name, sizeof(name), "model.layers.%d.input_layernorm.weight", l);
-        if (st_find_tensor(&sf, name) == nil)
-            break;
-        n_layers++;
+    /* Use tensor dim if not from config.json */
+    if (dim == 0)
+        dim = (int)emb_tensor->dims[1];
+
+    /* Count layers if not from config.json */
+    if (n_layers == 0) {
+        for (l = 0; l < 256; l++) {
+            snprint(name, sizeof(name), "model.layers.%d.input_layernorm.weight", l);
+            if (st_find_tensor(&sf, name) == nil)
+                break;
+            n_layers++;
+        }
     }
 
     if (n_layers == 0) {
@@ -681,19 +837,19 @@ st_load_transformer(char *path, void *transformer)
         return -1;
     }
 
-    /* Get hidden_dim from w1 shape [hidden_dim, dim] */
-    snprint(name, sizeof(name), "model.layers.0.mlp.gate_proj.weight");
-    STTensor *w1_tensor = st_find_tensor(&sf, name);
-    if (w1_tensor == nil || w1_tensor->n_dims < 2) {
-        fprint(2, "safetensors: missing or invalid gate_proj.weight\n");
-        st_close(&sf);
-        return -1;
+    /* Get hidden_dim from tensor if not from config.json */
+    if (hidden_dim == 0) {
+        snprint(name, sizeof(name), "model.layers.0.mlp.gate_proj.weight");
+        STTensor *w1_tensor = st_find_tensor(&sf, name);
+        if (w1_tensor == nil || w1_tensor->n_dims < 2) {
+            fprint(2, "safetensors: missing or invalid gate_proj.weight\n");
+            st_close(&sf);
+            return -1;
+        }
+        hidden_dim = (int)w1_tensor->dims[0];
     }
-    int hidden_dim = (int)w1_tensor->dims[0];
 
-    /* Get n_heads from q_proj shape [dim, dim] - assume dim/head_size */
-    /* For now, default to 6 heads (stories15M) or calculate from wq shape */
-    /* The HF config has this info, but we're inferring from weights only */
+    /* Verify q_proj exists */
     snprint(name, sizeof(name), "model.layers.0.self_attn.q_proj.weight");
     STTensor *wq_tensor = st_find_tensor(&sf, name);
     if (wq_tensor == nil || wq_tensor->n_dims < 2) {
@@ -702,17 +858,21 @@ st_load_transformer(char *path, void *transformer)
         return -1;
     }
 
-    /* Assume head_size = 48 (288/6) for stories15M, calculate n_heads */
-    int head_size = 48;  /* Common default */
-    if (dim == 288) head_size = 48;
-    else if (dim == 4096) head_size = 128;  /* LLaMA 7B/13B */
-    else head_size = dim / 8;  /* Guess 8 heads */
+    /* If n_heads not from config.json, infer from dim */
+    if (n_heads == 0) {
+        int hs = 48;  /* Common default */
+        if (dim == 288) hs = 48;
+        else if (dim == 4096) hs = 128;  /* LLaMA 7B/13B */
+        else hs = dim / 8;  /* Guess 8 heads */
+        n_heads = dim / hs;
+    }
 
-    int n_heads = dim / head_size;
-    int n_kv_heads = n_heads;  /* Assume MHA (not GQA) */
+    /* If n_kv_heads not set, assume MHA (same as n_heads) */
+    if (n_kv_heads == 0)
+        n_kv_heads = n_heads;
 
-    /* Sequence length - default for stories15M */
-    int seq_len = 256;
+    /* Calculate head_size from n_heads (needed for weight sizes) */
+    int head_size = dim / n_heads;
 
     /* Set config */
     t->config.dim = dim;
@@ -722,8 +882,8 @@ st_load_transformer(char *path, void *transformer)
     t->config.n_kv_heads = n_kv_heads;
     t->config.vocab_size = vocab_size;
     t->config.seq_len = seq_len;
-    t->config.rope_theta = 10000.0f;  /* Default LLaMA 2 */
-    t->config.arch_id = 1;  /* ARCH_LLAMA2 */
+    t->config.rope_theta = rope_theta;
+    t->config.arch_id = arch_id;
 
     /* Calculate total weights size (all FP32) */
     int kv_dim = (dim * n_kv_heads) / n_heads;
