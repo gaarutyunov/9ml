@@ -80,6 +80,7 @@ arch_list(ModelArch **out, int max)
 
 /* Forward declarations of registration functions */
 extern void llama2_register(void);
+extern void gemma3_register(void);
 
 static int arch_initialized = 0;
 
@@ -90,8 +91,9 @@ arch_init(void)
         return;
     }
 
-    /* Register llama2 - the only supported architecture */
+    /* Register built-in architectures */
     llama2_register();
+    gemma3_register();
 
     arch_initialized = 1;
 }

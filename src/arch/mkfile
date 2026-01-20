@@ -5,6 +5,7 @@ LIB=arch.a$O
 OFILES=\
 	arch.$O\
 	llama2.$O\
+	gemma3.$O\
 
 HFILES=\
 	arch.h\

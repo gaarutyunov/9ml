@@ -764,9 +764,15 @@ gguf_get_model_config(GGUFFile *gf, GGUFModelConfig *cfg)
     snprint(key, sizeof(key), "%s.rope.freq_base", cfg->arch_name);
     cfg->rope_theta = gguf_get_float(gf, key, 10000.0f);
 
-    /* Determine architecture ID - only llama is supported */
+    /* Determine architecture ID */
     if (strcmp(cfg->arch_name, "llama") == 0) {
         cfg->arch_id = 1;  /* ARCH_LLAMA2 */
+    } else if (strcmp(cfg->arch_name, "gemma") == 0 ||
+               strcmp(cfg->arch_name, "gemma2") == 0) {
+        cfg->arch_id = 1;  /* ARCH_LLAMA2 - Gemma 1/2 use LLaMA-compatible arch */
+    } else if (strcmp(cfg->arch_name, "gemma3") == 0 ||
+               strcmp(cfg->arch_name, "gemma3_text") == 0) {
+        cfg->arch_id = 2;  /* ARCH_GEMMA3 */
     } else {
         cfg->arch_id = 0;  /* ARCH_UNKNOWN */
     }
@@ -870,6 +876,15 @@ gguf_load_transformer(char *path, void *transformer)
         int dim, hidden_dim, n_layers, n_heads, n_kv_heads, vocab_size, seq_len;
         float rope_theta;
         int arch_id;
+        /* Gemma 3 specific fields */
+        int head_dim;
+        int sliding_window;
+        float rope_local_theta;
+        float rope_global_theta;
+        int use_qk_norm;
+        int ffn_type;
+        float rms_norm_eps;
+        int query_pre_attn_scalar;
     } TConfig;
 
     typedef struct {
@@ -880,6 +895,11 @@ gguf_load_transformer(char *path, void *transformer)
         float *w1, *w2, *w3;
         float *rms_final_weight;
         float *wcls;
+        /* Gemma 3 additional weights */
+        float *q_norm_weight;
+        float *k_norm_weight;
+        float *post_att_norm_weight;
+        float *post_ffn_norm_weight;
     } TWeights;
 
     /* RunState has 12 float pointers for activation buffers */
@@ -935,6 +955,62 @@ gguf_load_transformer(char *path, void *transformer)
     t->config.seq_len = cfg.seq_len;
     t->config.rope_theta = cfg.rope_theta;
     t->config.arch_id = cfg.arch_id;
+
+    /* Initialize Gemma 3 specific fields */
+    t->config.head_dim = 0;  /* Will be computed as dim / n_heads if not set */
+    t->config.sliding_window = 0;
+    t->config.rope_local_theta = 0;
+    t->config.rope_global_theta = 0;
+    t->config.use_qk_norm = 0;
+    t->config.ffn_type = 0;  /* FFN_SWIGLU */
+    t->config.rms_norm_eps = 1e-5f;
+    t->config.query_pre_attn_scalar = 0;
+
+    /* Initialize Gemma 3 weight pointers to nil */
+    t->weights.q_norm_weight = nil;
+    t->weights.k_norm_weight = nil;
+    t->weights.post_att_norm_weight = nil;
+    t->weights.post_ffn_norm_weight = nil;
+
+    /* Load Gemma 3 specific config if applicable */
+    if (cfg.arch_id == 2) {  /* ARCH_GEMMA3 */
+        char key[128];
+
+        /* Head dimension */
+        snprint(key, sizeof(key), "%s.attention.head_dim", cfg.arch_name);
+        t->config.head_dim = gguf_get_int(&gf, key, 0);
+        if (t->config.head_dim == 0) {
+            snprint(key, sizeof(key), "%s.attention.key_length", cfg.arch_name);
+            t->config.head_dim = gguf_get_int(&gf, key, cfg.dim / cfg.n_heads);
+        }
+
+        /* Sliding window */
+        snprint(key, sizeof(key), "%s.attention.sliding_window", cfg.arch_name);
+        t->config.sliding_window = gguf_get_int(&gf, key, 512);
+
+        /* RoPE thetas - Gemma 3 uses different theta for local vs global */
+        t->config.rope_local_theta = 10000.0f;
+        snprint(key, sizeof(key), "%s.rope.local.freq_base", cfg.arch_name);
+        t->config.rope_local_theta = gguf_get_float(&gf, key, 10000.0f);
+
+        t->config.rope_global_theta = 1000000.0f;
+        snprint(key, sizeof(key), "%s.rope.freq_base", cfg.arch_name);
+        t->config.rope_global_theta = gguf_get_float(&gf, key, 1000000.0f);
+
+        /* QK normalization */
+        t->config.use_qk_norm = 1;  /* Gemma 3 always uses QK norm */
+
+        /* FFN type - GeGLU for Gemma 3 */
+        t->config.ffn_type = 1;  /* FFN_GEGLU */
+
+        /* RMSNorm epsilon */
+        snprint(key, sizeof(key), "%s.attention.layer_norm_rms_epsilon", cfg.arch_name);
+        t->config.rms_norm_eps = gguf_get_float(&gf, key, 1e-6f);
+
+        /* Query pre-attention scalar */
+        snprint(key, sizeof(key), "%s.attention.query_pre_attn_scalar", cfg.arch_name);
+        t->config.query_pre_attn_scalar = gguf_get_int(&gf, key, t->config.head_dim);
+    }
 
     /* Calculate total weights size (all FP32) */
     int head_size = cfg.dim / cfg.n_heads;

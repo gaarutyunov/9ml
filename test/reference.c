@@ -185,3 +185,55 @@ float parse_keyval_float(const char *data, const char *key) {
     p += strlen(pattern);
     return strtof(p, NULL);
 }
+
+/* ----------------------------------------------------------------------------
+ * Gemma 3 specific reference implementations
+ * ---------------------------------------------------------------------------- */
+
+float ref_gelu_tanh(float x) {
+    /* GELU with tanh approximation (matches PyTorch gelu_pytorch_tanh) */
+    float c = 0.7978845608f;  /* sqrt(2/pi) */
+    float x3 = x * x * x;
+    float inner = c * (x + 0.044715f * x3);
+    return 0.5f * x * (1.0f + tanhf(inner));
+}
+
+void ref_rmsnorm_gemma(float *out, const float *x, const float *weight, int size, float eps) {
+    /* Gemma-style RMSNorm with +1 weight offset */
+    float ss = 0.0f;
+    for (int i = 0; i < size; i++) {
+        ss += x[i] * x[i];
+    }
+    ss /= size;
+    ss += eps;
+    ss = 1.0f / sqrtf(ss);
+
+    for (int i = 0; i < size; i++) {
+        out[i] = (1.0f + weight[i]) * (ss * x[i]);
+    }
+}
+
+void ref_qk_norm(float *out, const float *x, int size, float eps) {
+    /* Simple L2 normalization for QK */
+    float ss = 0.0f;
+    for (int i = 0; i < size; i++) {
+        ss += x[i] * x[i];
+    }
+    ss /= size;
+    ss += eps;
+    ss = 1.0f / sqrtf(ss);
+
+    for (int i = 0; i < size; i++) {
+        out[i] = x[i] * ss;
+    }
+}
+
+int ref_gemma3_is_local_layer(int layer_idx) {
+    /* 5 local layers, then 1 global layer, repeating */
+    return (layer_idx % 6) < 5;
+}
+
+float ref_gemma3_get_rope_theta(int layer_idx) {
+    /* Local layers use 10000, global layers use 1000000 */
+    return ref_gemma3_is_local_layer(layer_idx) ? 10000.0f : 1000000.0f;
+}

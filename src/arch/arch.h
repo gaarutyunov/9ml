@@ -28,6 +28,13 @@ enum {
 enum {
     ARCH_UNKNOWN = 0,
     ARCH_LLAMA2  = 1,
+    ARCH_GEMMA3  = 2,
+};
+
+/* Attention types for sliding window models */
+enum {
+    ATTN_GLOBAL = 0,
+    ATTN_LOCAL_SLIDING = 1,
 };
 
 typedef struct {
@@ -43,6 +50,16 @@ typedef struct {
     /* Extended fields */
     float rope_theta;   /* RoPE base frequency: 10000 (LLaMA2), 500000 (LLaMA3) */
     int arch_id;        /* architecture ID for plugin dispatch */
+
+    /* Gemma 3 specific fields */
+    int head_dim;           /* head dimension (default: dim / n_heads) */
+    int sliding_window;     /* sliding window size (0 = no sliding window) */
+    float rope_local_theta; /* RoPE theta for local layers (Gemma3: 10000) */
+    float rope_global_theta;/* RoPE theta for global layers (Gemma3: 1000000) */
+    int use_qk_norm;        /* whether to use QK normalization */
+    int ffn_type;           /* FFN_SWIGLU, FFN_GEGLU, etc. */
+    float rms_norm_eps;     /* RMSNorm epsilon (default: 1e-5) */
+    int query_pre_attn_scalar; /* scaling for attention (0 = use head_dim) */
 } ModelConfig;
 
 /* Backward compatibility typedef */
@@ -75,6 +92,12 @@ typedef struct {
     float *w3;                     /* (layer, hidden_dim, dim) */
     float *rms_final_weight;       /* (dim,) */
     float *wcls;                   /* classifier weights (may alias token_embedding_table) */
+
+    /* Gemma 3 additional weights */
+    float *q_norm_weight;          /* QK norm for Q (head_dim,) */
+    float *k_norm_weight;          /* QK norm for K (head_dim,) */
+    float *post_att_norm_weight;   /* post-attention norm (layer, dim) */
+    float *post_ffn_norm_weight;   /* post-FFN norm (layer, dim) */
 } TransformerWeights;
 
 /* Run-time state (activation buffers) */

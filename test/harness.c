@@ -38,7 +38,7 @@ typedef struct {
     char error[256];
 } TestResult;
 
-static TestResult results[30];
+static TestResult results[40];
 static int num_results = 0;
 static QemuVM vm;
 static DualVM dualvm;
@@ -121,6 +121,10 @@ static int prepare_shared_disk(void) {
         TESTS_DIR "/test_pool_lru.c",
         TESTS_DIR "/test_format_generation.c",
         TESTS_DIR "/test_config_json.c",
+        TESTS_DIR "/test_gelu.c",
+        TESTS_DIR "/test_gemma3_components.c",
+        TESTS_DIR "/test_gemma3_arch.c",
+        TESTS_DIR "/gemma3_test_data.h",
         NULL
     };
 
@@ -140,6 +144,7 @@ static int prepare_shared_disk(void) {
         SRC_DIR "/arch/arch.h",
         SRC_DIR "/arch/arch.c",
         SRC_DIR "/arch/llama2.c",
+        SRC_DIR "/arch/gemma3.c",
         NULL
     };
     for (int i = 0; arch_files[i]; i++) {
@@ -445,6 +450,21 @@ static int run_vm_tests(void) {
     run_vm_cmd("6c -w -Iformat -Ipool test_format_generation.c >[2=1] > fmtgen.log; echo fmtgen_compiled", 120);
     run_vm_cmd("6l -o t_format_generation test_format_generation.6 simd_amd64.6 arch/arch.a6 format/format.a6 >[2=1] >> fmtgen.log; echo fmtgen_linked", 30);
     run_vm_cmd("./t_format_generation > format_generation.out >[2=1]", 300);
+
+    /* GELU activation test (Gemma 3) */
+    run_vm_cmd("6c -w test_gelu.c", 60);
+    run_vm_cmd("6l -o t_gelu test_gelu.6", 30);
+    run_vm_cmd("./t_gelu > gelu.out >[2=1]", 60);
+
+    /* Gemma 3 components test */
+    run_vm_cmd("6c -w test_gemma3_components.c", 60);
+    run_vm_cmd("6l -o t_gemma3_comp test_gemma3_components.6", 30);
+    run_vm_cmd("./t_gemma3_comp > gemma3_components.out >[2=1]", 60);
+
+    /* Gemma 3 architecture test */
+    run_vm_cmd("6c -w test_gemma3_arch.c", 60);
+    run_vm_cmd("6l -o t_gemma3_arch test_gemma3_arch.6", 30);
+    run_vm_cmd("./t_gemma3_arch > gemma3_arch.out >[2=1]", 60);
 
     /* Mark completion */
     run_vm_cmd("echo done > complete.txt", 2);
@@ -1650,6 +1670,127 @@ static void test_format_generation(void) {
     free(data);
 }
 
+/* Test: GELU activation (Gemma 3) */
+static void test_gelu(void) {
+    printf("Testing gelu... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "gelu.out", &size);
+    if (!data || size == 0) {
+        add_result("gelu", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "GELU tests passed") != NULL) {
+        add_result("gelu", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("gelu", 0, 0, "GELU test failed");
+        printf("FAIL (GELU test failed)\n");
+    } else {
+        add_result("gelu", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  GELU test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "gelu(")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: Gemma 3 components */
+static void test_gemma3_components(void) {
+    printf("Testing gemma3_components... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "gemma3_components.out", &size);
+    if (!data || size == 0) {
+        add_result("gemma3_components", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All Gemma 3 component tests passed") != NULL) {
+        add_result("gemma3_components", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("gemma3_components", 0, 0, "Gemma 3 component test failed");
+        printf("FAIL (Gemma 3 component test failed)\n");
+    } else {
+        add_result("gemma3_components", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Gemma 3 components test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
+/* Test: Gemma 3 architecture */
+static void test_gemma3_arch(void) {
+    printf("Testing gemma3_arch... ");
+
+    int size;
+    char *data = fat_read_file(SHARED_IMAGE, "gemma3_arch.out", &size);
+    if (!data || size == 0) {
+        add_result("gemma3_arch", 0, 0, "no output file - likely crashed");
+        printf("FAIL (no output - likely crashed)\n");
+        free(data);
+        return;
+    }
+
+    /* Check for PASS/FAIL in output */
+    if (strstr(data, "PASS: All") != NULL && strstr(data, "architecture tests passed") != NULL) {
+        add_result("gemma3_arch", 1, 0, NULL);
+        printf("PASS\n");
+    } else if (strstr(data, "FAIL") != NULL) {
+        add_result("gemma3_arch", 0, 0, "Gemma 3 arch test failed");
+        printf("FAIL (Gemma 3 arch test failed)\n");
+    } else {
+        add_result("gemma3_arch", 0, 0, "unknown result");
+        printf("FAIL (unknown result)\n");
+    }
+
+    /* Print detailed output */
+    printf("  Gemma 3 architecture test output:\n");
+    char *data_copy = strdup(data);
+    char *line = strtok(data_copy, "\n");
+    while (line) {
+        if (strstr(line, "===") || strstr(line, "PASS") ||
+            strstr(line, "FAIL") || strstr(line, "Test") ||
+            strstr(line, "Pattern") || strstr(line, "Layer")) {
+            printf("    %s\n", line);
+        }
+        line = strtok(NULL, "\n");
+    }
+    free(data_copy);
+    free(data);
+}
+
 /* Run llmfs tests in single VM (local mount) */
 static void run_vm_llmfs_local(void) {
     printf("\n==================================================\n");
@@ -2078,6 +2219,9 @@ int main(int argc, char *argv[]) {
     if (should_run_test("safetensors")) test_safetensors();
     if (should_run_test("pool_lru")) test_pool_lru();
     if (should_run_test("format_generation")) test_format_generation();
+    if (should_run_test("gelu")) test_gelu();
+    if (should_run_test("gemma3_components")) test_gemma3_components();
+    if (should_run_test("gemma3_arch")) test_gemma3_arch();
     if (should_run_test("llmfs_local")) test_llmfs_local();
     if (should_run_test("llmfs_remote")) test_llmfs_remote();
 

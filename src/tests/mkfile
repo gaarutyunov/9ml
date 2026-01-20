@@ -12,6 +12,9 @@ TESTS=\
 	test_gguf_dequant\
 	test_http\
 	test_safetensors\
+	test_gelu\
+	test_gemma3_arch\
+	test_gemma3_components\
 
 # Benchmark test (requires SIMD assembly)
 BENCH=test_benchmark
