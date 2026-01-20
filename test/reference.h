@@ -43,4 +43,11 @@ int parse_int_output(const char *data, uint32_t *out, int max_n);
 int parse_keyval_int(const char *data, const char *key);
 float parse_keyval_float(const char *data, const char *key);
 
+/* Gemma 3 specific reference implementations */
+float ref_gelu_tanh(float x);
+void ref_rmsnorm_gemma(float *out, const float *x, const float *weight, int size, float eps);
+void ref_qk_norm(float *out, const float *x, int size, float eps);
+int ref_gemma3_is_local_layer(int layer_idx);
+float ref_gemma3_get_rope_theta(int layer_idx);
+
 #endif /* REFERENCE_H */
