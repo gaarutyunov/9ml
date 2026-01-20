@@ -119,7 +119,7 @@ In Plan 9:
 
 ## LLM File Server (llmfs)
 
-A 9P file server for multi-model inference with LRU eviction.
+llmfs is a 9P file server that exposes LLM inference as a Plan 9 filesystem. It supports multiple models with LRU eviction and enables distributed inference where a powerful server runs models and thin clients access them over the network.
 
 ### File System Structure
 
@@ -136,39 +136,162 @@ A 9P file server for multi-model inference with LRU eviction.
         stream      # Streaming output
 ```
 
-### Usage
+### Building llmfs
+
+In Plan 9:
+```rc
+cd /usr/glenda/9ml/src
+mk llmfs
+```
+
+To install globally:
+```rc
+cp llmfs /amd64/bin/
+```
+
+### Local Usage
 
 ```rc
-# Start server and mount
-./llmfs -s llm
+# Start the file server
+llmfs -s llm
+
+# Mount it
 mount /srv/llm /mnt/llm
 
-# Load a model
+# Load a model (name, model file, tokenizer)
 echo 'load small stories15M.safetensors tokenizer.bin' > /mnt/llm/ctl
 
-# Create session and generate
+# Check pool info
+cat /mnt/llm/info
+
+# Create a session
+session=`{cat /mnt/llm/clone}
+
+# Bind model to session and configure
+echo 'model small' > /mnt/llm/$session/ctl
+echo 'temp 0.0' > /mnt/llm/$session/ctl
+echo 'steps 50' > /mnt/llm/$session/ctl
+
+# Set prompt and generate
+echo 'Once upon a time' > /mnt/llm/$session/prompt
+echo 'generate' > /mnt/llm/$session/ctl
+
+# Read output (blocks until complete)
+cat /mnt/llm/$session/output
+
+# Check session info
+cat /mnt/llm/$session/info
+```
+
+### Remote Usage with Drawterm
+
+This setup allows you to run llmfs on a remote server and access it from your local machine using drawterm.
+
+#### Server Setup (9front in QEMU)
+
+1. **Start QEMU with port forwarding:**
+```bash
+qemu-system-x86_64 -m 1024 -cpu max -enable-kvm \
+  -drive file=9front.qcow2,format=qcow2,if=virtio \
+  -device virtio-net-pci,netdev=net0 \
+  -netdev user,id=net0,hostfwd=tcp::9564-:564,hostfwd=tcp::17019-:17019 \
+  -vnc :1
+```
+
+2. **Boot 9front and configure network:**
+```rc
+# Accept defaults at boot prompts (press Enter twice)
+# Configure network (QEMU user networking)
+ip/ipconfig -6
+```
+
+3. **Set up authentication (factotum):**
+```rc
+# Add authentication key
+echo 'key proto=dp9ik dom=llmfs user=glenda !password=yourpassword' > /mnt/factotum/ctl
+```
+
+4. **Start CPU listener:**
+```rc
+# Create service script
+mkdir -p /rc/bin/service
+cat > /rc/bin/service/tcp17019 <<'EOF'
+#!/bin/rc
+exec /bin/cpu -R
+EOF
+chmod +x /rc/bin/service/tcp17019
+
+# Start listener
+aux/listen1 -t tcp!*!17019 /rc/bin/service/tcp17019
+```
+
+5. **Start llmfs and load model:**
+```rc
+llmfs -s llm
+mount /srv/llm /mnt/llm
+echo 'load small /path/to/model.safetensors /path/to/tokenizer.bin' > /mnt/llm/ctl
+```
+
+#### Client Setup (macOS/Linux)
+
+1. **Install drawterm:**
+```bash
+# macOS / Linux (build from source)
+git clone https://github.com/9front/drawterm
+cd drawterm
+# macOS
+CONF=osx-cocoa make
+# Linux
+make
+```
+
+2. **Connect to remote server:**
+```bash
+drawterm -h <server-ip>:17019 -a <server-ip>:17019 -u glenda
+```
+
+When prompted, enter the password you set in factotum.
+
+3. **Use llmfs from drawterm:**
+```rc
+# Mount llmfs (already running on server)
+mount /srv/llm /mnt/llm
+
+# Create session and generate text
 session=`{cat /mnt/llm/clone}
 echo 'model small' > /mnt/llm/$session/ctl
 echo 'Once upon a time' > /mnt/llm/$session/prompt
-echo 'generate' > /mnt/llm/$session/ctl
+echo generate > /mnt/llm/$session/ctl
 cat /mnt/llm/$session/output
 ```
 
-### Remote Inference
+#### Drawterm Tips
 
-On server:
-```rc
-./llmfs -s llm
-echo 'load small model.safetensors tokenizer.bin' > /srv/llm/ctl
-aux/listen1 -tv tcp!*!564 /bin/exportfs -r /srv/llm
-```
+- **Resize text:** Right-click on window, select "Resize" or use keyboard shortcuts
+- **Previous command:** Use up arrow or Ctrl-P
+- **Copy/paste:** Select text with mouse to copy, middle-click to paste
+- **Exit:** Type `exit` or close the window
 
-On client:
-```rc
-srv tcp!server!564 llm
-mount /srv/llm /mnt/llm
-# Use as if local
-```
+### Session Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `model <name>` | Bind session to named model |
+| `temp <float>` | Set temperature (0.0 = greedy) |
+| `topp <float>` | Set top-p sampling (0.0-1.0) |
+| `seed <int>` | Set random seed |
+| `steps <int>` | Set max tokens to generate |
+| `generate` | Start generation |
+| `reset` | Reset session state |
+| `close` | Close session |
+
+### Server Control Commands
+
+| Command | Description |
+|---------|-------------|
+| `load <name> <model> <tokenizer>` | Load model into pool with given name |
+| `unload <name>` | Unload model from pool |
+| `limit <max_models> <max_memory>` | Set pool limits |
 
 ## Performance
 
@@ -180,7 +303,7 @@ mount /srv/llm /mnt/llm
 | rmsnorm | SSE2 assembly | ~3x |
 | dot_product | SSE2 assembly | ~4x |
 | vec_add, vec_scale | SSE2 assembly | ~4x |
-| softmax | C with unrolling | ~2x |
+| softmax | SSE2 assembly | ~60x |
 
 ### Benchmark Results
 

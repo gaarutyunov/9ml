@@ -1,5 +1,6 @@
 </$objtype/mkfile
 
+CFLAGS=-D__plan9__
 TARG=run runq export llmfs
 
 # SIMD assembly files for amd64
