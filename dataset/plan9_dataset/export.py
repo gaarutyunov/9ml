@@ -50,6 +50,28 @@ def load_examples(raw_path: Path) -> list[Example]:
     return [Example.from_dict(item) for item in data]
 
 
+def load_examples_jsonl(jsonl_path: Path) -> list[Example]:
+    """Load examples from JSONL file.
+
+    Args:
+        jsonl_path: Path to dataset.jsonl
+
+    Returns:
+        List of Example objects
+    """
+    if not jsonl_path.exists():
+        return []
+
+    examples = []
+    with open(jsonl_path) as f:
+        for line in f:
+            if line.strip():
+                data = json.loads(line)
+                examples.append(Example.from_dict(data))
+
+    return examples
+
+
 def save_examples(examples: list[Example], raw_path: Path) -> None:
     """Save examples to raw examples file.
 

@@ -469,6 +469,131 @@ def validate(ctx: click.Context, qemu_dir: Path | None, quick: bool, category: t
             console.print(f"      Error: {r.error[:100]}")
 
 
+@cli.command()
+@click.option("--input", "input_path", type=click.Path(path_type=Path, exists=True), help="Input JSONL file")
+@click.option("--qemu-dir", type=click.Path(path_type=Path, exists=True), help="Path to qemu directory")
+@click.option("--quick", is_flag=True, help="Quick syntax validation without QEMU")
+@click.pass_context
+def validate_jsonl(ctx: click.Context, input_path: Path | None, qemu_dir: Path | None, quick: bool) -> None:
+    """Validate dataset.jsonl examples in Plan 9 QEMU VM.
+
+    Validates C code compiles and rc scripts have valid syntax.
+    """
+    from . import validate as val
+    from .export import load_examples_jsonl
+
+    data_dir = ctx.obj["data_dir"]
+
+    if input_path is None:
+        input_path = data_dir / "dataset.jsonl"
+
+    if not input_path.exists():
+        console.print(f"[red]No dataset file at {input_path}[/red]")
+        raise SystemExit(1)
+
+    # Load examples
+    examples = load_examples_jsonl(input_path)
+    console.print(f"Loaded {len(examples)} examples from {input_path}")
+
+    if quick:
+        console.print("Running quick syntax validation...")
+        # Quick validation - check brace matching, etc.
+        valid_count = 0
+        invalid_count = 0
+        for i, ex in enumerate(examples):
+            response = ex.response
+            code_type = val.detect_code_type(response)
+            errors = []
+
+            if code_type == "c":
+                if response.count("{") != response.count("}"):
+                    errors.append("Mismatched braces")
+                if response.count("(") != response.count(")"):
+                    errors.append("Mismatched parens")
+
+            if errors:
+                console.print(f"[red]✗[/red] [{i}] {ex.category}: {', '.join(errors)}")
+                invalid_count += 1
+            else:
+                console.print(f"[green]✓[/green] [{i}] {ex.category}")
+                valid_count += 1
+
+        console.print(f"\n[bold]Results:[/bold] {valid_count} valid, {invalid_count} invalid")
+        return
+
+    # Full QEMU validation
+    if qemu_dir is None:
+        possible_paths = [
+            Path.cwd().parent / "qemu",
+            Path.cwd().parent.parent / "qemu",
+            Path("/home/ubuntu/9ml/qemu"),
+        ]
+        for p in possible_paths:
+            if (p / "9front.qcow2").exists():
+                qemu_dir = p
+                break
+
+    if qemu_dir is None or not (qemu_dir / "9front.qcow2").exists():
+        console.print("[red]QEMU directory not found. Use --qemu-dir or --quick[/red]")
+        raise SystemExit(1)
+
+    console.print(f"Validating in Plan 9 QEMU VM...")
+    console.print(f"QEMU dir: {qemu_dir}")
+
+    disk_image = str(qemu_dir / "9front.qcow2")
+    shared_image = str(qemu_dir / "shared.img")
+
+    # Create fresh shared disk
+    disk = val.FATDisk(shared_image)
+    if not disk.create(64):
+        console.print("[red]Failed to create shared disk[/red]")
+        raise SystemExit(1)
+
+    # Start VM
+    vm = val.Plan9VM(disk_image, shared_image, debug=False)
+    try:
+        console.print("Booting Plan 9 VM...")
+        if not vm.boot():
+            console.print("[red]Failed to boot VM[/red]")
+            raise SystemExit(1)
+        console.print("VM booted successfully")
+
+        valid_count = 0
+        invalid_count = 0
+        skipped_count = 0
+
+        for i, ex in enumerate(examples):
+            code_type = val.detect_code_type(ex.response)
+            code = val.extract_code(ex.response) or ex.response
+
+            vm.clear_output()
+
+            if code_type == "c":
+                valid, error = val.validate_c_code(code, disk, vm)
+            elif code_type == "rc":
+                valid, error = val.validate_rc_code(code, disk, vm)
+            else:
+                console.print(f"[yellow]~[/yellow] [{i}] {ex.category}: skipped ({code_type})")
+                skipped_count += 1
+                continue
+
+            if valid:
+                console.print(f"[green]✓[/green] [{i}] {ex.category}")
+                valid_count += 1
+            else:
+                console.print(f"[red]✗[/red] [{i}] {ex.category}: {error[:60]}")
+                invalid_count += 1
+
+        console.print(f"\n[bold]Validation Results[/bold]")
+        console.print(f"[green]Valid: {valid_count}[/green]")
+        console.print(f"[red]Invalid: {invalid_count}[/red]")
+        console.print(f"[yellow]Skipped: {skipped_count}[/yellow]")
+
+    finally:
+        console.print("Shutting down VM...")
+        vm.shutdown()
+
+
 # ============================================================================
 # GRPO Training Commands
 # ============================================================================
