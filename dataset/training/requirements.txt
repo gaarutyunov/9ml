@@ -1,0 +1,34 @@
+# Training dependencies for GRPO fine-tuning
+# Install with: pip install -r requirements.txt
+
+# Core ML frameworks
+torch>=2.0
+transformers>=4.40
+
+# TRL for GRPO training
+trl>=0.8
+
+# Unsloth for efficient LoRA (optional but recommended)
+# Install separately: pip install unsloth
+# unsloth
+
+# Dataset handling
+datasets>=2.0
+
+# Accelerate for distributed training
+accelerate>=0.20
+
+# PEFT for LoRA (fallback if unsloth not available)
+peft>=0.10
+
+# BitsAndBytes for quantization
+bitsandbytes>=0.43
+
+# Evaluation and monitoring
+evaluate>=0.4
+
+# Optional: Weights & Biases for experiment tracking
+# wandb
+
+# Optional: Tensorboard for local logging
+# tensorboard
