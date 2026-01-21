@@ -1,0 +1,352 @@
+[
+  {
+    "prompt": "Write a Plan 9 C program that prints 'Hello, Plan 9!'",
+    "expected_output": "Hello, Plan 9!",
+    "complexity": "simple",
+    "category": "c-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that prints the current date",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-basics",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Write a Plan 9 C program that prints the numbers 1 to 5",
+    "expected_output": "5",
+    "complexity": "simple",
+    "category": "c-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that lists all files in the current directory",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-basics",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Write a Plan 9 C program that calculates 2+2 and prints the result",
+    "expected_output": "4",
+    "complexity": "simple",
+    "category": "c-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that prints 'success' if a file exists, 'missing' otherwise",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-basics",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Read the /dev/user file and print its contents",
+    "expected_output": "glenda",
+    "complexity": "simple",
+    "category": "sys-info",
+    "tool_count_hint": 1
+  },
+  {
+    "prompt": "Write a Plan 9 C program that prints the program name (argv[0])",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-args",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that reads a file called 'input.txt' and prints its contents",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-io",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that creates a temp file, writes 'test data' to it, and reads it back",
+    "expected_output": "test data",
+    "complexity": "medium",
+    "category": "rc-files",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write a Plan 9 C program that takes a command line argument and prints it",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-args",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that counts the number of .c files in the current directory",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-files",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that calculates the factorial of 5",
+    "expected_output": "120",
+    "complexity": "medium",
+    "category": "c-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc function that prints an error message to stderr and exits",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-functions",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that reads from stdin until EOF and counts the lines",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-io",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that finds all .c files and prints their names",
+    "expected_output": ".c",
+    "complexity": "medium",
+    "category": "rc-files",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that implements a simple calculator for +, -, *, /",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "c-parsing",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write an rc script that builds a C program and runs it if compilation succeeds",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "rc-build",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write a Plan 9 C program that uses Bio to read a config file line by line",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "c-io",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write an rc script that processes command line flags using aux/getflags",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "rc-flags",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write a Plan 9 C program that walks a directory and prints all file names",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "c-io",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write an rc script that creates multiple temp files, processes them, and cleans up",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "rc-files",
+    "tool_count_hint": 6
+  },
+  {
+    "prompt": "Write a Plan 9 C program that prints 'even' if a number is even, 'odd' otherwise",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that echoes all command line arguments",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-basics",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Write a Plan 9 C program that prints 'Hello' 3 times",
+    "expected_output": "Hello",
+    "complexity": "simple",
+    "category": "c-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a mkfile that compiles a single C file into a binary",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "mkfile",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write a Plan 9 C program that reverses a string",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-strings",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that checks if a directory exists and creates it if not",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-files",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that sorts an array of integers",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "c-algorithms",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write an rc script that installs a program by compiling and copying to /bin",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "rc-install",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write a Plan 9 C program that concatenates two strings using smprint",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-strings",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that copies a file from one location to another",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-files",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Write a Plan 9 C program that prints environment variable $home",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-env",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that runs a command and checks its exit status",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-basics",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that uses ARGBEGIN/ARGEND for flag parsing",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-args",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that loops through files in a directory",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-loops",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that reads and parses a simple key=value config file",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "c-io",
+    "tool_count_hint": 5
+  },
+  {
+    "prompt": "Write an rc script with signal handlers for cleanup on exit",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-signals",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that forks a child process",
+    "expected_output": null,
+    "complexity": "complex",
+    "category": "c-process",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that uses awk to process text",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-text",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that opens a file with error checking",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-errors",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that creates a subshell for isolated execution",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-subshell",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Write a Plan 9 C program that implements strlen without using the library",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-strings",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that pipes output between multiple commands",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "rc-pipes",
+    "tool_count_hint": 2
+  },
+  {
+    "prompt": "Write a Plan 9 C program that uses a struct to represent a point (x, y)",
+    "expected_output": null,
+    "complexity": "simple",
+    "category": "c-types",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write an rc script that redirects stdout and stderr to different files",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-redirect",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that dynamically allocates an array",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-memory",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that uses rfork to create a new namespace",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-namespace",
+    "tool_count_hint": 3
+  },
+  {
+    "prompt": "Write a Plan 9 C program that uses nsec() for timing",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "c-time",
+    "tool_count_hint": 4
+  },
+  {
+    "prompt": "Write an rc script that mounts a FAT filesystem",
+    "expected_output": null,
+    "complexity": "medium",
+    "category": "rc-mount",
+    "tool_count_hint": 3
+  }
+]

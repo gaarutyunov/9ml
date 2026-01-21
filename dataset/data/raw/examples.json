@@ -1,0 +1,200 @@
+[
+  {
+    "instruction": "Write a simple rc shell script that prints 'Hello, Plan 9!'",
+    "response": "#!/bin/rc\necho 'Hello, Plan 9!'",
+    "source": "manual",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "How do I include the standard headers in a Plan 9 C program?",
+    "response": "In Plan 9 C, you include the standard headers like this:\n\n#include <u.h>\n#include <libc.h>\n\nThe <u.h> header defines basic types (like uchar, vlong, uvlong) and must come first. The <libc.h> header provides standard library functions (print, exits, malloc, etc.).",
+    "source": "manual",
+    "category": "c-headers"
+  },
+  {
+    "instruction": "Write a Plan 9 C program that exits with an error message",
+    "response": "#include <u.h>\n#include <libc.h>\n\nvoid\nmain(int argc, char *argv[])\n{\n\tif(argc < 2){\n\t\tfprint(2, \"usage: %s filename\\n\", argv[0]);\n\t\texits(\"usage\");\n\t}\n\t/* program logic here */\n\texits(nil);\n}",
+    "source": "manual",
+    "category": "c-errors"
+  },
+  {
+    "instruction": "What does 'rfork ne' do at the start of an rc script?",
+    "response": "The 'rfork ne' command at the start of an rc script creates a new process with:\n\n- 'n': A new namespace (the process gets its own mount table)\n- 'e': A new environment (environment variables are copied, not shared)\n\nThis isolates the script from affecting the parent shell's namespace and environment. It's a common idiom in Plan 9 scripts to ensure the script runs in a clean, isolated context.",
+    "source": "git9/clone",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "How do I parse command-line flags in an rc script using aux/getflags?",
+    "response": "Use the flagfmt variable and aux/getflags:\n\n#!/bin/rc -e\nrfork ne\n\nflagfmt='d:debug, b:branch branch'; args='remote [local]'\neval `''{aux/getflags $*} || exec aux/usage\n\nif(~ $debug 1)\n\techo 'Debug mode enabled'\nif(~ $#branch 1)\n\techo 'Branch:' $branch\n\nThe flagfmt string defines:\n- 'd:debug' - a boolean flag -d that sets $debug to 1\n- 'b:branch branch' - a flag -b that takes an argument stored in $branch\n\nThe args string describes positional arguments for the usage message.",
+    "source": "git9/clone",
+    "category": "rc-flags"
+  },
+  {
+    "instruction": "Write an rc function that prints an error message and exits",
+    "response": "fn die{\n\t>[1=2] echo $0: $*\n\texit $\"*\n}\n\nUsage:\ndie 'file not found:' $filename\n\nThis function:\n- Redirects stdout to stderr with >[1=2]\n- Prints the script name ($0) followed by the arguments\n- Exits with the arguments as the exit status string ($\"* joins the list with spaces)",
+    "source": "git9/common.rc",
+    "category": "rc-functions"
+  },
+  {
+    "instruction": "How do I check if a variable is empty in rc shell?",
+    "response": "Use the ~ (match) operator with $#var to check the list length:\n\n# Check if var is empty (zero elements)\nif(~ $#var 0)\n\techo 'var is empty'\n\n# Check if var has exactly one element\nif(~ $#var 1)\n\techo 'var has one element'\n\n# Check if var matches a pattern\nif(~ $var pattern*)\n\techo 'var matches pattern'\n\n# Check if var is not empty\nif(! ~ $#var 0)\n\techo 'var is set'",
+    "source": "git9/init",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "Write a basic Plan 9 mkfile to build a C program",
+    "response": "</$objtype/mkfile\n\nBIN=/$objtype/bin\nTARG=myprogram\n\nOFILES=\\\n\tmain.$O\\\n\tutil.$O\n\n</sys/src/cmd/mkone\n\nThis mkfile:\n- Includes the architecture-specific mkfile for compiler settings\n- Sets BIN to the binary installation directory\n- TARG is the target executable name\n- OFILES lists object files ($O expands to the arch suffix, e.g., '6' for amd64)\n- Includes mkone which provides standard build rules",
+    "source": "unionfs/mkfile",
+    "category": "mkfile"
+  },
+  {
+    "instruction": "How do I redirect output to a file in rc shell while also writing multiple lines?",
+    "response": "Use brace blocks with redirection:\n\n# Write multiple lines to a file\n>config.txt {\n\techo 'key1 = value1'\n\techo 'key2 = value2'\n}\n\n# Append to a file\n>>config.txt {\n\techo 'key3 = value3'\n}\n\n# Combine with conditionals\n>.git/config {\n\techo '[core]'\n\techo '\trepositoryformatversion = p9.0'\n\tif(! ~ $#upstream 0){\n\t\techo '[remote \"origin\"]'\n\t\techo '\turl = '$upstream\n\t}\n}",
+    "source": "git9/init",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "Write a Plan 9 C function that reads a configuration file line by line",
+    "response": "#include <u.h>\n#include <libc.h>\n#include <bio.h>\n\nint\nreadconfig(char *path)\n{\n\tBiobuf *f;\n\tchar *line;\n\n\tif((f = Bopen(path, OREAD)) == nil)\n\t\treturn -1;\n\n\twhile((line = Brdstr(f, '\\n', 1)) != nil){\n\t\t/* process line */\n\t\tprint(\"%s\\n\", line);\n\t\tfree(line);\n\t}\n\tBterm(f);\n\treturn 0;\n}\n\nBiobuf provides buffered I/O:\n- Bopen() opens a file for buffered reading\n- Brdstr() reads a line, strips the delimiter if the third arg is 1\n- The returned string must be freed\n- Bterm() closes the buffer",
+    "source": "git9/conf.c",
+    "category": "c-io"
+  },
+  {
+    "instruction": "How do I use ARGBEGIN/ARGEND for argument parsing in Plan 9 C?",
+    "response": "#include <u.h>\n#include <libc.h>\n\nvoid\nusage(void)\n{\n\tfprint(2, \"usage: %s [-d] [-f file] [-n num]\\n\", argv0);\n\texits(\"usage\");\n}\n\nvoid\nmain(int argc, char **argv)\n{\n\tchar *file = nil;\n\tint debug = 0;\n\tint num = 10;\n\n\tARGBEGIN{\n\tcase 'd':\n\t\tdebug = 1;\n\t\tbreak;\n\tcase 'f':\n\t\tfile = EARGF(usage());\n\t\tbreak;\n\tcase 'n':\n\t\tnum = atoi(EARGF(usage()));\n\t\tbreak;\n\tdefault:\n\t\tusage();\n\t}ARGEND;\n\n\t/* argc/argv now point to remaining args */\n\tif(argc < 1)\n\t\tusage();\n\n\texits(nil);\n}\n\nARGBEGIN/ARGEND automatically sets argv0 to the program name.\nEARGF(usage()) gets the flag's argument, calling usage() if missing.",
+    "source": "git9/conf.c",
+    "category": "c-args"
+  },
+  {
+    "instruction": "Write a signal handler function in rc shell",
+    "response": "#!/bin/rc -e\nrfork ne\n\ntmpfile=/tmp/work.$pid\n\n# Signal handler for interrupt (Ctrl+C)\nfn sigint{\n\techo 'Interrupted, cleaning up...' >[1=2]\n\trm -f $tmpfile\n\texit interrupted\n}\n\n# Cleanup handler that runs on exit\nfn sigexit{\n\trm -f $tmpfile\n}\n\n# Main script\necho 'Working...' > $tmpfile\nsleep 10\necho 'Done'\n\nCommon signal handlers:\n- fn sigint{} - handles SIGINT (Ctrl+C)\n- fn sigexit{} - runs when script exits (for cleanup)\n- fn sighup{} - handles SIGHUP",
+    "source": "git9/clone",
+    "category": "rc-functions"
+  },
+  {
+    "instruction": "How do I run a subshell in rc that doesn't affect the parent environment?",
+    "response": "Use @{} for subshells:\n\n# Run commands in a subshell\n@{cd /tmp && mk install}\n\n# Capture subshell status\n@{cd $dir && mk} || die 'build failed'\n\n# Subshell with flag changes\n@{\n\tflag e +    # disable exit on error in subshell only\n\tcommand1\n\tcommand2\n}\n\n# Multiple subshells for parallel-like behavior\nfor(d in pkg1 pkg2 pkg3)\n\t@{cd $d && mk install}\n\nThe subshell inherits but doesn't modify parent's:\n- Current directory\n- Environment variables\n- Flag settings",
+    "source": "git9/commit",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "Write a Plan 9 C program that uses the thread library",
+    "response": "#include <u.h>\n#include <libc.h>\n#include <thread.h>\n\nvoid\nworker(void *arg)\n{\n\tint id = (int)(uintptr)arg;\n\tprint(\"Worker %d running\\n\", id);\n\tthreadexits(nil);\n}\n\nvoid\nthreadmain(int argc, char **argv)\n{\n\tint i;\n\n\tfor(i = 0; i < 4; i++)\n\t\tproccreate(worker, (void*)(uintptr)i, 8192);\n\n\tthreadexits(nil);\n}\n\nKey differences from regular programs:\n- Use threadmain() instead of main()\n- Use threadexits() instead of exits()\n- proccreate() spawns a new process with the given stack size\n- threadcreate() spawns a thread in the same process",
+    "source": "manual",
+    "category": "c-threads"
+  },
+  {
+    "instruction": "What are the Plan 9 C type equivalents for standard C types?",
+    "response": "Plan 9 C uses different type names defined in <u.h>:\n\n| Standard C  | Plan 9     | Size    |\n|-------------|------------|---------|  \n| int8_t      | schar      | 8-bit   |\n| uint8_t     | uchar      | 8-bit   |\n| int16_t     | short      | 16-bit  |\n| uint16_t    | ushort     | 16-bit  |\n| int32_t     | int        | 32-bit  |\n| uint32_t    | uint/u32int| 32-bit  |\n| int64_t     | vlong      | 64-bit  |\n| uint64_t    | uvlong     | 64-bit  |\n| size_t      | ulong      | arch    |\n| ssize_t     | long       | arch    |\n| NULL        | nil        | pointer |\n\nAlways include <u.h> first, then <libc.h>.",
+    "source": "manual",
+    "category": "c-types"
+  },
+  {
+    "instruction": "How do I allocate memory that exits on failure in Plan 9 C?",
+    "response": "Use the e-prefixed allocation functions:\n\n#include <u.h>\n#include <libc.h>\n\nvoid *emalloc(ulong n)\n{\n\tvoid *p;\n\tp = malloc(n);\n\tif(p == nil)\n\t\tsysfatal(\"malloc: %r\");\n\treturn p;\n}\n\nchar *estrdup(char *s)\n{\n\tchar *p;\n\tp = strdup(s);\n\tif(p == nil)\n\t\tsysfatal(\"strdup: %r\");\n\treturn p;\n}\n\nvoid *erealloc(void *p, ulong n)\n{\n\tp = realloc(p, n);\n\tif(p == nil)\n\t\tsysfatal(\"realloc: %r\");\n\treturn p;\n}\n\nThe %r format prints the last system error message. sysfatal() prints the message and exits.",
+    "source": "manual",
+    "category": "c-memory"
+  },
+  {
+    "instruction": "Write an rc script that processes files in a loop",
+    "response": "#!/bin/rc -e\nrfork ne\n\n# Define newline for proper list splitting\nnl='\n'\n\n# Process files from command line\nfor(f in $*){\n\tif(test -f $f)\n\t\techo 'Processing:' $f\n\tif not\n\t\techo 'Skipping (not a file):' $f >[1=2]\n}\n\n# Process files from a command\nfor(f in `$nl{find . -name '*.c'}){\n\techo 'Found C file:' $f\n}\n\n# Process with index\ni=1\nfor(f in $*){\n\techo $i: $f\n\ti=`{echo $i + 1 | hoc}\n}\n\nNote: Use `$nl{...} to split output by newlines instead of whitespace.",
+    "source": "git9/clone",
+    "category": "rc-loops"
+  },
+  {
+    "instruction": "How do I create a 9P file server in Plan 9 C?",
+    "response": "#include <u.h>\n#include <libc.h>\n#include <fcall.h>\n#include <thread.h>\n#include <9p.h>\n\nvoid fsread(Req *r);\nvoid fswrite(Req *r);\nvoid fsopen(Req *r);\n\nSrv fs = {\n\t.open = fsopen,\n\t.read = fsread,\n\t.write = fswrite,\n};\n\nvoid\nfsopen(Req *r)\n{\n\trespond(r, nil);  /* nil means success */\n}\n\nvoid\nfsread(Req *r)\n{\n\tchar *data = \"Hello from 9P!\\n\";\n\treadstr(r, data);\n\trespond(r, nil);\n}\n\nvoid\nfswrite(Req *r)\n{\n\tr->ofcall.count = r->ifcall.count;\n\trespond(r, nil);\n}\n\nvoid\nthreadmain(int argc, char **argv)\n{\n\tpostmountsrv(&fs, \"myfs\", \"/mnt/myfs\", MREPL);\n\tthreadexits(nil);\n}\n\nThis creates a server at /srv/myfs and mounts it at /mnt/myfs.",
+    "source": "git9/fs.c",
+    "category": "c-9p"
+  },
+  {
+    "instruction": "How do I concatenate strings in Plan 9 C?",
+    "response": "Use smprint() for formatted string allocation:\n\n#include <u.h>\n#include <libc.h>\n\nvoid\nexample(void)\n{\n\tchar *path;\n\tchar *dir = \"/home\";\n\tchar *file = \"config\";\n\n\t/* Allocate and format string */\n\tpath = smprint(\"%s/%s\", dir, file);\n\tif(path == nil)\n\t\tsysfatal(\"smprint: %r\");\n\n\tprint(\"Path: %s\\n\", path);\n\tfree(path);\n}\n\nOther useful functions:\n- snprint(buf, n, fmt, ...) - format into fixed buffer\n- seprint(buf, end, fmt, ...) - format with end pointer\n- strdup(s) - duplicate a string\n- strecpy(to, end, from) - safe string copy",
+    "source": "manual",
+    "category": "c-strings"
+  },
+  {
+    "instruction": "Write an rc function that uses awk for text processing",
+    "response": "# Function to substitute text\nfn subst {\n\tawk '\n\tBEGIN{ARGC=0}\n\t{sub(ARGV[1], ARGV[2]); print}\n\t' $*\n}\n\n# Function to drop a prefix from lines\nfn drop {\n\tawk '\n\tBEGIN{ARGC=0}\n\t{\n\t\tif(index($0, ARGV[1]) == 1)\n\t\t\t$0=substr($0, length(ARGV[1])+1)\n\t\tprint\n\t}\n\t' $*\n}\n\n# Usage:\necho '/home/user/file' | subst '/home' '/users'\n# Output: /users/user/file\n\necho '/prefix/rest' | drop '/prefix'\n# Output: /rest\n\nNote: ARGC=0 in BEGIN prevents awk from treating arguments as files.",
+    "source": "git9/common.rc",
+    "category": "rc-functions"
+  },
+  {
+    "instruction": "How do I handle errors in Plan 9 C without errno?",
+    "response": "Plan 9 uses string-based errors instead of errno. Use errstr() and werrstr():\n\n#include <u.h>\n#include <libc.h>\n\nint\nmyfunction(char *path)\n{\n\tint fd;\n\tchar err[ERRMAX];\n\n\tfd = open(path, OREAD);\n\tif(fd < 0){\n\t\t/* Get the error string */\n\t\trerrstr(err, sizeof(err));\n\t\tfprint(2, \"open %s: %s\\n\", path, err);\n\t\treturn -1;\n\t}\n\n\t/* Or use %r format specifier */\n\tif(read(fd, buf, n) < 0){\n\t\tfprint(2, \"read: %r\\n\");\n\t\tclose(fd);\n\t\treturn -1;\n\t}\n\n\t/* Set custom error for callers */\n\tif(somecondition){\n\t\twerrstr(\"invalid format\");\n\t\treturn -1;\n\t}\n\n\treturn 0;\n}\n\n%r in format strings prints the current error string.",
+    "source": "manual",
+    "category": "c-errors"
+  },
+  {
+    "instruction": "How do I mount a file server in rc shell?",
+    "response": "Use srv and mount commands:\n\n#!/bin/rc\n\n# Mount a local 9P server\nsrv myfs\nmount /srv/myfs /mnt/myfs\n\n# Mount with create permission\nmount -c /srv/myfs /mnt/myfs\n\n# Mount a remote 9P server over TCP\nsrv tcp!server!564 remote\nmount /srv/remote /mnt/remote\n\n# Mount a FAT disk (DOS filesystem)\ndossrv -f /dev/sdC0/dos fatfs\nmount /srv/fatfs /mnt/dos\n\n# Unmount\nunmount /mnt/myfs\n\n# Bind directories (like mount --bind)\nbind /src /dest\nbind -a /src /dest  # bind after (union)\nbind -b /src /dest  # bind before (union)",
+    "source": "manual",
+    "category": "sys-mount"
+  },
+  {
+    "instruction": "Write an rc script that creates and uses a temporary file safely",
+    "response": "#!/bin/rc -e\nrfork ne\n\n# Use $pid for unique temp files\ntmpfile=/tmp/work.$pid\n\n# Cleanup on exit\nfn sigexit{\n\trm -f $tmpfile\n}\n\n# Cleanup on interrupt\nfn sigint{\n\trm -f $tmpfile\n\texit interrupted\n}\n\n# Use the temp file\necho 'data' > $tmpfile\nprocess < $tmpfile > output\n\n# Temp file is auto-cleaned by sigexit\nexit ''",
+    "source": "git9/commit",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "How do I use channels for communication between threads in Plan 9?",
+    "response": "#include <u.h>\n#include <libc.h>\n#include <thread.h>\n\nChannel *workchan;\nChannel *donechan;\n\nvoid\nworker(void *arg)\n{\n\tint val;\n\n\twhile(recv(workchan, &val) > 0){\n\t\tprint(\"Processing: %d\\n\", val);\n\t\t/* do work */\n\t}\n\tsendul(donechan, 1);\n\tthreadexits(nil);\n}\n\nvoid\nthreadmain(int argc, char **argv)\n{\n\tint i;\n\n\tworkchan = chancreate(sizeof(int), 10);  /* buffered */\n\tdonechan = chancreate(sizeof(ulong), 0); /* unbuffered */\n\n\tproccreate(worker, nil, 8192);\n\n\tfor(i = 0; i < 100; i++)\n\t\tsend(workchan, &i);\n\n\tchanclose(workchan);\n\trecvul(donechan);  /* wait for worker */\n\n\tthreadexits(nil);\n}\n\nChannel functions:\n- chancreate(size, bufsize) - create channel\n- send/recv - blocking send/receive\n- nbsend/nbrecv - non-blocking\n- chanclose - close channel",
+    "source": "manual",
+    "category": "c-threads"
+  },
+  {
+    "instruction": "How do I walk a directory tree in Plan 9 C?",
+    "response": "#include <u.h>\n#include <libc.h>\n\nvoid\nwalkdir(char *path)\n{\n\tDir *d;\n\tint fd, i, n;\n\tchar *subpath;\n\n\tfd = open(path, OREAD);\n\tif(fd < 0){\n\t\tfprint(2, \"open %s: %r\\n\", path);\n\t\treturn;\n\t}\n\n\twhile((n = dirread(fd, &d)) > 0){\n\t\tfor(i = 0; i < n; i++){\n\t\t\tsubpath = smprint(\"%s/%s\", path, d[i].name);\n\t\t\tprint(\"%s\\n\", subpath);\n\n\t\t\tif(d[i].mode & DMDIR)\n\t\t\t\twalkdir(subpath);\n\n\t\t\tfree(subpath);\n\t\t}\n\t\tfree(d);\n\t}\n\tclose(fd);\n}\n\ndirread() returns Dir structs with:\n- name: file name\n- mode: DMDIR for directories\n- length, mtime, qid, etc.",
+    "source": "manual",
+    "category": "c-io"
+  },
+  {
+    "instruction": "Write a Plan 9 mkfile with custom rules and dependencies",
+    "response": "</$objtype/mkfile\n\nBIN=/$objtype/bin\nTARG=mytool\n\nHFILES=\\\n\tutil.h\\\n\ttypes.h\n\nOFILES=\\\n\tmain.$O\\\n\tutil.$O\\\n\tparser.$O\n\n</sys/src/cmd/mkone\n\n# Custom rule for generated code\nparser.c: parser.y\n\tyacc -o $target $prereq\n\n# Install man page\ninstall:V: $BIN/$TARG\n\tcp $TARG.1 /sys/man/1/$TARG\n\n# Run tests\ntest:V:\n\t./test.rc\n\n# Clean generated files\nnuke:V: clean\n\trm -f parser.c\n\nMkfile variables:\n- $target: the target being built\n- $prereq: prerequisites\n- $stem: pattern match stem\n- V: virtual target (always run)",
+    "source": "manual",
+    "category": "mkfile"
+  },
+  {
+    "instruction": "How do I implement a usage function in Plan 9 C?",
+    "response": "#include <u.h>\n#include <libc.h>\n\nvoid\nusage(void)\n{\n\tfprint(2, \"usage: %s [-d] [-n num] [-f file] args...\\n\", argv0);\n\tfprint(2, \"  -d        enable debug output\\n\");\n\tfprint(2, \"  -n num    set count (default: 10)\\n\");\n\tfprint(2, \"  -f file   read from file\\n\");\n\texits(\"usage\");\n}\n\nvoid\nmain(int argc, char **argv)\n{\n\tint debug = 0;\n\tint num = 10;\n\tchar *file = nil;\n\n\tARGBEGIN{\n\tcase 'd': debug = 1; break;\n\tcase 'n': num = atoi(EARGF(usage())); break;\n\tcase 'f': file = EARGF(usage()); break;\n\tdefault: usage();\n\t}ARGEND;\n\n\tif(argc < 1)\n\t\tusage();\n\n\t/* argv0 is set by ARGBEGIN */\n\texits(nil);\n}\n\nConventions:\n- fprint to fd 2 (stderr)\n- exits(\"usage\") is the standard exit status\n- argv0 is auto-set by ARGBEGIN",
+    "source": "manual",
+    "category": "c-args"
+  },
+  {
+    "instruction": "How do I manipulate namespaces in rc shell?",
+    "response": "#!/bin/rc\n\n# Create new namespace (isolated from parent)\nrfork n\n\n# Bind one directory over another\nbind /usr/local/bin /bin\n\n# Union bind - add to existing namespace\nbind -a /extra/lib /lib   # after existing contents\nbind -b /extra/lib /lib   # before existing contents\n\n# Create private /tmp\nrfork n\nbind -c /tmp /mnt/private\n\n# Mount remote filesystem into namespace\nsrv tcp!fileserver!564 fs\nmount -c /srv/fs /mnt/remote\n\n# View current namespace\ncat /proc/$pid/ns\n\nrfork flags:\n- n: new namespace\n- e: new environment  \n- N: new namespace, no inherited mounts\n- s: share namespace with parent",
+    "source": "manual",
+    "category": "sys-namespace"
+  },
+  {
+    "instruction": "Write an rc script that checks command exit status",
+    "response": "#!/bin/rc\n\n# Check status with if\nif(grep -s pattern file){\n\techo 'Pattern found'\n}\nif not {\n\techo 'Pattern not found'\n}\n\n# Store status in variable\ncommand arg1 arg2\nst=$status\nif(! ~ $st ''){\n\techo 'Command failed:' $st\n\texit $st\n}\n\n# Chain commands - exit on first failure\n#!/bin/rc -e    # -e flag exits on error\nmk clean\nmk all\nmk install\n\n# Explicit error handling\n@{\n\tflag e +      # disable -e in subshell\n\tcommand1\n\tcommand2\n\tif(! ~ $status '')\n\t\techo 'Something failed' >[1=2]\n}\n\n# Empty string '' means success\nif(~ $status '')\n\techo 'Success'",
+    "source": "git9/clone",
+    "category": "rc-basics"
+  },
+  {
+    "instruction": "How do I use locks in Plan 9 C?",
+    "response": "#include <u.h>\n#include <libc.h>\n#include <thread.h>\n\n/* Simple spin lock */\nLock mylock;\n\nvoid\nprotected_function(void)\n{\n\tlock(&mylock);\n\t/* critical section */\n\tunlock(&mylock);\n}\n\n/* QLock - queueing lock (blocks instead of spinning) */\nQLock qlock;\n\nvoid\nqueue_protected(void)\n{\n\tqlock(&qlock);\n\t/* critical section */\n\tqunlock(&qlock);\n}\n\n/* RWLock - multiple readers, single writer */\nRWLock rwlock;\n\nvoid\nreader(void)\n{\n\trlock(&rwlock);\n\t/* read data */\n\trunlock(&rwlock);\n}\n\nvoid\nwriter(void)\n{\n\twlock(&rwlock);\n\t/* modify data */\n\twunlock(&rwlock);\n}\n\nUse QLock for general locking, RWLock when reads >> writes.",
+    "source": "unionfs/unionfs.c",
+    "category": "c-threads"
+  },
+  {
+    "instruction": "Write an rc script that installs software from source",
+    "response": "#!/bin/rc -e\nrfork ne\n\n# Install dependencies first\nfor(d in libogg libvorbis){\n\t@{cd /sys/src/cmd/audio/$d && mk install}\n}\n\n# Build and install main package\nfor(d in decoder encoder tools){\n\t@{cd $d && mk install} || {\n\t\techo 'Failed to build' $d >[1=2]\n\t\texit 'build failed'\n\t}\n}\n\n# Install config files\nif(! test -f /lib/myapp/config){\n\tmkdir -p /lib/myapp\n\tcp config.default /lib/myapp/config\n}\n\necho 'Installation complete'\nexit ''",
+    "source": "treason/install.rc",
+    "category": "rc-install"
+  },
+  {
+    "instruction": "How do I format time in Plan 9 C?",
+    "response": "#include <u.h>\n#include <libc.h>\n\nvoid\nexample(void)\n{\n\tTm *t;\n\tvlong now;\n\tchar buf[64];\n\n\t/* Get current time in nanoseconds */\n\tnow = nsec();\n\n\t/* Get current time as seconds since epoch */\n\tnow = time(0);\n\n\t/* Convert to Tm structure */\n\tt = localtime(time(0));\n\n\t/* Format time manually */\n\tsnprint(buf, sizeof(buf), \"%04d-%02d-%02d %02d:%02d:%02d\",\n\t\tt->year + 1900, t->mon + 1, t->mday,\n\t\tt->hour, t->min, t->sec);\n\tprint(\"%s\\n\", buf);\n\n\t/* Tm fields: */\n\t/* sec, min, hour, mday, mon (0-11), year (since 1900) */\n\t/* wday (0=Sunday), yday (0-365), zone, tzoff */\n}\n\nFor high-precision timing, use nsec() which returns nanoseconds.",
+    "source": "manual",
+    "category": "c-time"
+  },
+  {
+    "instruction": "How do I pipe commands together in rc shell?",
+    "response": "# Basic pipe\ncat file | grep pattern | wc -l\n\n# Pipe with multiple file descriptors\ncmd1 |[2] cmd2           # pipe stderr of cmd1 to stdin of cmd2\ncmd1 |[1=2] cmd2          # pipe stdout as stderr  \ncmd1 >[2=1] | cmd2        # merge stderr to stdout, then pipe\n\n# Named pipe using files\n<>{cmd1 >/fd/0} | cmd2    # more complex redirection\n\n# Capture output to variable\nresult=`{cmd1 | cmd2}\n\n# Capture with newline splitting\nnl='\n'\nlines=`$nl{find . -name '*.c'}\n\n# Pipe to while read equivalent\ncmd | while(line=`{read}){\n\techo $line\n}\n\n# Process substitution workaround\ndiff <{cmd1} <{cmd2}      # not directly supported\n# Use temp files instead:\ncmd1 > /tmp/a.$pid\ncmd2 > /tmp/b.$pid\ndiff /tmp/a.$pid /tmp/b.$pid",
+    "source": "manual",
+    "category": "rc-pipes"
+  }
+]
